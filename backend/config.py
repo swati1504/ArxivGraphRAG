@@ -35,6 +35,9 @@ class Settings(BaseSettings):
     rag_ollama_model: str = Field(default="", alias="RAG_OLLAMA_MODEL")
     rag_gemini_model: str = Field(default="gemini-1.5-flash-latest", alias="RAG_GEMINI_MODEL")
 
+    graph_provider: str = Field(default="gemini", alias="GRAPH_PROVIDER")
+    graph_gemini_model: str = Field(default="gemini-1.5-flash-latest", alias="GRAPH_GEMINI_MODEL")
+
     ollama_host: str = Field(default="http://localhost:11434", alias="OLLAMA_HOST")
 
     chunk_size: int = Field(default=4000, alias="CHUNK_SIZE")

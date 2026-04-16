@@ -34,6 +34,8 @@ class Settings(BaseSettings):
     rag_provider: str = Field(default="ollama", alias="RAG_PROVIDER")
     rag_ollama_model: str = Field(default="", alias="RAG_OLLAMA_MODEL")
     rag_gemini_model: str = Field(default="gemini-1.5-flash-latest", alias="RAG_GEMINI_MODEL")
+    rag_input_cost_per_1k: float | None = Field(default=None, alias="RAG_INPUT_COST_PER_1K")
+    rag_output_cost_per_1k: float | None = Field(default=None, alias="RAG_OUTPUT_COST_PER_1K")
 
     graph_provider: str = Field(default="gemini", alias="GRAPH_PROVIDER")
     graph_gemini_model: str = Field(default="gemini-1.5-flash-latest", alias="GRAPH_GEMINI_MODEL")

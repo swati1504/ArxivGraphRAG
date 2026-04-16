@@ -21,12 +21,7 @@ class VectorRetriever:
         self._expected_dimension = expected_dimension
 
     def retrieve(self, *, question: str, top_k: int) -> list[RetrievedContext]:
-        qvec = self._embedder.embed_texts([question])[0]
-        if len(qvec) != self._expected_dimension:
-            raise RuntimeError(
-                f"Embedding dimension mismatch: got {len(qvec)} but expected {self._expected_dimension}. "
-                "Set EMBEDDINGS_DIM to match your embedding model and ensure the Pinecone index dimension matches."
-            )
+        qvec = self.embed_query(question=question)
         matches = self._index.query(vector=qvec, top_k=top_k, namespace=self._namespace)
         out: list[RetrievedContext] = []
         for m in matches:
@@ -47,3 +42,12 @@ class VectorRetriever:
                 )
             )
         return out
+
+    def embed_query(self, *, question: str) -> list[float]:
+        qvec = self._embedder.embed_texts([question])[0]
+        if len(qvec) != self._expected_dimension:
+            raise RuntimeError(
+                f"Embedding dimension mismatch: got {len(qvec)} but expected {self._expected_dimension}. "
+                "Set EMBEDDINGS_DIM to match your embedding model and ensure the Pinecone index dimension matches."
+            )
+        return qvec

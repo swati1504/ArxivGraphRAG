@@ -13,9 +13,39 @@ The project should be built in phases so that every phase produces a usable arti
 
 ***
 
+## Implementation status
+
+| Phase | Name | Status |
+| --- | --- | --- |
+| Phase 1 | Standard RAG: ingestion + `/query/rag` | Done |
+| Phase 2 | GraphRAG: graph build + `/query/graphrag` | Done |
+| Phase 3 | RAGAS evaluation + A/B comparison | To do |
+| Phase 4 | Multi-agent orchestration with LangGraph | To build |
+| Phase 5 | Frontend, tracing, deployment, and portfolio packaging | Later |
+
+### Current interview narrative
+
+Phase 1:
+
+> I built an ingestion pipeline over arXiv ML papers using local embeddings with `nomic-embed-text` via Ollama, so embedding does not require API cost. Chunks are stored in Pinecone for similarity search and in a local ChunkStore keyed by `paper_id` and `chunk_index`, which becomes important when graph edges need to point back to evidence.
+
+Phase 2:
+
+> I extended the baseline with a Neo4j knowledge graph. Gemini extracts typed triples from each chunk in JSON mode with a constrained schema: five node types, high-confidence relationships, and evidence-linked edges. At query time, GraphRAG runs seed retrieval, graph expansion, evidence chunk lookup, filtered Pinecone retrieval, and graph-aware synthesis.
+
+Phase 3:
+
+> I evaluated Standard RAG and GraphRAG with RAGAS across faithfulness, answer relevancy, context precision, and context recall on a curated benchmark with factual, entity-centric, and relational questions. GraphRAG should win on relational questions, while Standard RAG should remain faster and cheaper for simple factual questions. Showing that tradeoff honestly makes the project credible.
+
+Phase 4:
+
+> I added a LangGraph orchestration layer with specialized agents. A Query Classifier routes simple questions directly to vector retrieval, skipping Neo4j. Complex relational questions trigger planning and parallel retrieval. An Evidence Merger deduplicates sources, flags `CONTRADICTS` edges as contested claims, and passes a structured evidence packet to the Synthesizer. Every response includes an `agent_trace` with route decisions, tools used, timing, and cost.
+
+***
+
 ## Big Picture
 
-### Final system
+### Current system
 
 ```text
                          User Question
@@ -49,13 +79,57 @@ The project should be built in phases so that every phase produces a usable arti
                                 -> entity extraction -> Neo4j
 ```
 
+### Target multi-agent system
+
+```text
+                         User Question
+                               |
+                               v
+                      POST /query/agent
+                               |
+                               v
+                     LangGraph agent graph
+                  /            |              \
+                 v             v               v
+          QueryClassifier   Planner       Routing policy
+                 |             |               |
+                 |             v               |
+                 |       decomposed tasks      |
+                 |             |               |
+                 +-------------+---------------+
+                               |
+                               v
+              +----------------+----------------+
+              |                                 |
+              v                                 v
+        VectorRetriever                  GraphRetriever
+              |                                 |
+              +----------------+----------------+
+                               |
+                               v
+                        EvidenceMerger
+                               |
+                               v
+                         Synthesizer
+                               |
+                               v
+             structured answer + citations + agent_trace[]
+
+
+                    Direct endpoints remain available
+
+           POST /query/rag       -> Standard RAG only
+           POST /query/graphrag  -> 5-step GraphRAG
+           POST /evaluate        -> RAGAS A/B report
+```
+
 ### What each subsystem teaches
 
 - **Ingestion** teaches data pipelines, document cleaning, metadata handling
 - **Standard RAG** teaches embeddings, retrieval, prompt grounding, citations
 - **GraphRAG** teaches knowledge graphs, schema design, Cypher, multi-hop reasoning
 - **Evaluation** teaches measurement, tradeoffs, faithfulness, cost awareness
-- **Orchestration later** teaches stateful workflows and agent routing
+- **Multi-agent orchestration** teaches routing, decomposition, parallel retrieval, traceability, and stateful workflows
 
 ***
 
@@ -338,7 +412,7 @@ returns a grounded answer supported by chunks from the ingested papers.
 
 ***
 
-## Phase 2 — Knowledge graph construction
+## Phase 2A — Knowledge graph construction
 
 ### Objective
 
@@ -462,7 +536,7 @@ Open Neo4j Browser and inspect a graph where:
 
 ***
 
-## Phase 3 — Graph retrieval and GraphRAG answering
+## Phase 2B — Graph retrieval and GraphRAG answering
 
 ### Objective
 
@@ -587,7 +661,7 @@ Learn:
 
 ***
 
-## Phase 4 — Evaluation and A/B comparison
+## Phase 3 — Evaluation and A/B comparison
 
 ### Objective
 
@@ -694,6 +768,172 @@ Learn:
 
 ***
 
+## Phase 4 — Multi-agent orchestration with LangGraph
+
+### Objective
+
+Add a stateful orchestration layer that chooses the cheapest sufficient retrieval path for each query, decomposes complex questions, runs retrievers in parallel when useful, and returns a transparent execution trace.
+
+### Why this phase matters
+
+This is the "latest AI systems" layer of the project. The goal is not to make every step agentic. The goal is to show judgment: simple factual questions should use the fast vector path, while relational and multi-hop questions should trigger graph retrieval, planning, and evidence reconciliation.
+
+### Endpoint
+
+Add:
+
+- `POST /query/agent`
+
+Keep these direct endpoints available for debugging and A/B comparison:
+
+- `POST /query/rag`
+- `POST /query/graphrag`
+- `POST /evaluate`
+
+### Agent graph
+
+```text
+User query
+   |
+   v
+QueryClassifier
+   |
+   +---------------- simple ----------------+
+   |                                        |
+   v                                        |
+VectorRetriever                             |
+   |                                        |
+   +--------------------+-------------------+
+                        |
+                    Synthesizer
+                        |
+                        v
+                     answer
+
+
+User query
+   |
+   v
+QueryClassifier
+   |
+   +--------------- relational / multi-hop ---------------+
+                                                           |
+                                                           v
+                                                        Planner
+                                                           |
+                                    +----------------------+----------------------+
+                                    |                                             |
+                                    v                                             v
+                             VectorRetriever                              GraphRetriever
+                                    |                                             |
+                                    +----------------------+----------------------+
+                                                           |
+                                                           v
+                                                    EvidenceMerger
+                                                           |
+                                                           v
+                                                     Synthesizer
+                                                           |
+                                                           v
+                                       structured answer + citations + agent_trace[]
+```
+
+### Agents to build
+
+1. `QueryClassifier`
+   - labels the query as `simple_factual`, `summarization`, `entity_centric`, `relational`, or `multi_hop`
+   - decides whether Neo4j is needed
+   - emits a confidence score and routing reason
+
+2. `Planner`
+   - decomposes relational questions into sub-questions
+   - identifies likely paper, method, concept, and author entities
+   - decides whether to run vector retrieval, graph retrieval, or both
+
+3. `VectorRetriever`
+   - reuses the Phase 1 retriever
+   - returns ranked text chunks with `paper_id`, `chunk_index`, score, and source title
+
+4. `GraphRetriever`
+   - reuses the Phase 2B GraphRAG retrieval logic
+   - returns graph edges, graph evidence chunks, related papers, and contested edges
+
+5. `EvidenceMerger`
+   - deduplicates chunks by `(paper_id, chunk_index)`
+   - merges graph facts with text evidence
+   - detects `CONTRADICTS` edges and marks them as contested claims
+   - optionally reranks the final evidence packet before synthesis
+
+6. `Synthesizer`
+   - chooses the prompt style based on route:
+     - concise factual answer
+     - literature synthesis
+     - comparison table
+     - contested findings summary
+   - answers only from retrieved evidence
+   - returns citations and insufficient-evidence notes when needed
+
+### Shared state shape
+
+```text
+{
+  "question": "...",
+  "query_type": "relational",
+  "route": "vector_only | graph_only | hybrid_parallel",
+  "sub_questions": [],
+  "vector_contexts": [],
+  "graph_edges": [],
+  "merged_contexts": [],
+  "contested_claims": [],
+  "answer": "...",
+  "citations": [],
+  "agent_trace": [
+    {
+      "agent": "QueryClassifier",
+      "decision": "hybrid_parallel",
+      "latency_ms": 42,
+      "tokens": 120,
+      "cost_usd": 0.0001
+    }
+  ]
+}
+```
+
+### Deliverable
+
+`/query/agent` returns:
+
+- final answer
+- citations
+- retrieved text contexts
+- graph evidence summary
+- contested claims, if any
+- selected route
+- `agent_trace[]` with latency, token, cost, and decision metadata
+
+### What you should understand before leaving this phase
+
+- why orchestration is different from retrieval
+- why state machines fit multi-step agent workflows
+- when a pipeline deserves agent-style routing
+- how routing can reduce latency and cost without reducing answer quality
+- how to make agent systems observable enough to debug
+
+### Resources
+
+- LangGraph docs and tutorials
+- LangSmith tracing docs if you later add observability
+- RAGAS agent and tool-use metrics for later evaluation
+
+### Resume bullets unlocked by this phase
+
+- Built a LangGraph multi-agent RAG orchestrator with query classification, planning, parallel retrieval, evidence merging, and grounded synthesis.
+- Reduced unnecessary graph lookups by routing simple factual questions to vector retrieval only.
+- Added traceable agent execution with per-node latency, token, cost, and route-decision metadata.
+- Designed contested-claim handling for graph edges that represent contradictory findings across papers.
+
+***
+
 ## Phase 5 — Frontend and developer-facing visualization
 
 ### Objective
@@ -707,13 +947,15 @@ A simple frontend helps communicate the project clearly even if the primary goal
 ### Frontend pages
 
 - `Query.tsx`: ask a question and compare RAG vs GraphRAG answers
+- `AgentTrace.tsx`: show route decisions, agent timings, and cost per step
 - `Graph.tsx`: show graph subgraph returned for GraphRAG
 - `Evaluation.tsx`: show comparison table and charts
 
 ### Suggested visuals
 
-- answer cards side by side
+- answer comparison view for RAG, GraphRAG, and Agent RAG
 - graph visualization with highlighted query entity nodes
+- route decision timeline
 - latency bar chart
 - cost bar chart
 - RAGAS score comparison chart
@@ -726,66 +968,11 @@ A minimal UI that helps you inspect and explain the system.
 
 - how system outputs should be exposed for debugging and explanation
 - why visibility is important for trust
+- how trace views make agent systems easier to debug
 
 ***
 
-## Phase 6 — Orchestration with LangGraph
-
-### Objective
-
-Add stateful orchestration after the pipelines are already working.
-
-### Why this phase matters
-
-LangGraph is best used after the workflow is understood. It should represent meaningful routing logic, not just wrap sequential steps.
-
-### Candidate nodes
-
-- Planner
-- QueryClassifier
-- VectorRetriever
-- GraphRetriever
-- Synthesizer
-- Evaluator or debug node later
-
-### Example orchestration idea
-
-```text
-User query
-   |
-   v
-QueryClassifier
-   |--------------------|
-   |                    |
-simple               relational
-   |                    |
-   v                    v
-VectorRetriever     VectorRetriever + GraphRetriever
-   |                    |
-   \---------Synthesizer/
-               |
-               v
-             answer
-```
-
-### Deliverable
-
-A LangGraph-based routing layer that chooses the lighter or heavier retrieval path depending on query type.
-
-### What you should understand before leaving this phase
-
-- why orchestration is different from retrieval
-- why state machines fit multi-step agent workflows
-- when a pipeline deserves agent-style routing
-
-### Resources
-
-- LangGraph docs and tutorials
-- LangSmith tracing docs if you later add observability
-
-***
-
-## Phase 7 — Polish, tracing, deployment, and portfolio packaging
+## Phase 6 — Polish, tracing, deployment, and portfolio packaging
 
 ### Objective
 
@@ -819,12 +1006,12 @@ A polished portfolio repository and demo-ready presentation.
 ```text
 Phase 0: scope + benchmark + schema
 Phase 1: ingestion + Standard RAG
-Phase 2: graph construction
-Phase 3: GraphRAG retrieval
-Phase 4: evaluation
-Phase 5: frontend
-Phase 6: LangGraph orchestration
-Phase 7: polish and deployment
+Phase 2A: graph construction
+Phase 2B: GraphRAG retrieval
+Phase 3: RAGAS evaluation + A/B comparison
+Phase 4: LangGraph multi-agent orchestration
+Phase 5: frontend and visualization
+Phase 6: tracing, deployment, and portfolio packaging
 ```
 
 ***
@@ -862,6 +1049,64 @@ Phase 7: polish and deployment
 - config management
 - idempotent ingestion
 - error handling and retries
+
+***
+
+## High-impact additions for a stronger AI/ML portfolio
+
+These additions are not all required, but they are the ones most likely to make the project stand out for AI/ML engineering roles.
+
+### Retrieval quality upgrades
+
+- Add hybrid retrieval: dense embeddings plus sparse keyword retrieval for exact paper, method, and acronym matches.
+- Add a reranker after retrieval so final evidence is ordered by relevance before synthesis.
+- Add section-aware chunk metadata such as `abstract`, `method`, `experiments`, `limitations`, and `references`.
+- Add citation validation so every cited `[paper_id:chunk_index]` appears in the returned context.
+
+### Graph quality upgrades
+
+- Add entity resolution beyond lowercasing, especially for method aliases and author name variants.
+- Add graph quality checks:
+  - duplicate node rate
+  - dangling edge count
+  - low-confidence edge count
+  - relation distribution by type
+- Add graph provenance fields: extraction model, extraction timestamp, source chunk, confidence, and prompt version.
+
+### Evaluation upgrades
+
+- Store evaluation runs as artifacts so results are reproducible.
+- Compare `rag`, `graphrag`, and `agent` on the same benchmark.
+- Track quality, latency, token usage, estimated cost, route selected, and graph hops used.
+- Add manual error categories:
+  - missing evidence
+  - weak citation
+  - irrelevant retrieval
+  - graph noise
+  - synthesis hallucination
+
+### Agent and observability upgrades
+
+- Add LangSmith or OpenTelemetry tracing for each agent node.
+- Return `agent_trace[]` from `/query/agent` for local debugging and frontend visualization.
+- Add route accuracy evaluation: did the classifier choose the cheapest route that still answered correctly?
+- Add a failure fallback: if graph retrieval fails, continue with vector retrieval and mark the response as degraded.
+
+### Production-readiness upgrades
+
+- Add Docker Compose for FastAPI, Neo4j, and local Ollama setup notes.
+- Add CI checks for linting, basic tests, and import health.
+- Add request IDs and structured JSON logs.
+- Add rate limiting and input size limits.
+- Treat LLM outputs as untrusted: validate JSON, constrain Cypher, and never execute model-generated database queries directly.
+
+### Portfolio deliverables
+
+- One architecture diagram showing ingestion, RAG, GraphRAG, evaluation, and multi-agent routing.
+- One benchmark table with quality, latency, and cost.
+- One graph visualization screenshot.
+- One agent trace screenshot.
+- One short technical blog-style write-up explaining when GraphRAG helps and when it is overkill.
 
 ***
 
@@ -916,15 +1161,14 @@ That is the core portfolio outcome.
 
 ***
 
-## Immediate next step after plan approval
+## Immediate next step
 
-Start with Phase 0 and Phase 1 only:
+Since Phase 1 and Phase 2 are already implemented, the next best step is Phase 3:
 
-1. create the backend project skeleton
-2. implement configuration
-3. fetch a small arXiv dataset
-4. parse and chunk papers
-5. build Pinecone ingestion
-6. implement `/query/rag`
+1. finalize 15 benchmark questions across factual, entity-centric, and relational categories
+2. implement the RAGAS evaluator
+3. run `/query/rag` and `/query/graphrag` on the same benchmark
+4. record quality, latency, token usage, and estimated cost
+5. write a short A/B report explaining where GraphRAG helped, where it did not, and why
 
-Only after the baseline works should Phase 2 begin.
+After the A/B report exists, build Phase 4 so the multi-agent router can be evaluated against both direct endpoints.

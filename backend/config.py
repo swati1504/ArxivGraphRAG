@@ -40,6 +40,9 @@ class Settings(BaseSettings):
     graph_provider: str = Field(default="gemini", alias="GRAPH_PROVIDER")
     graph_gemini_model: str = Field(default="gemini-1.5-flash-latest", alias="GRAPH_GEMINI_MODEL")
 
+    eval_provider: str = Field(default="gemini", alias="EVAL_PROVIDER")
+    eval_gemini_model: str = Field(default="gemini-1.5-flash-latest", alias="EVAL_GEMINI_MODEL")
+
     ollama_host: str = Field(default="http://localhost:11434", alias="OLLAMA_HOST")
 
     chunk_size: int = Field(default=4000, alias="CHUNK_SIZE")

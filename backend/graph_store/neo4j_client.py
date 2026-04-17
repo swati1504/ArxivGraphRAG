@@ -47,7 +47,9 @@ class Neo4jClient:
     def run_read(self, cypher: str, parameters: dict[str, Any] | None = None) -> list[dict[str, Any]]:
         try:
             with self._driver.session() as session:
-                result = session.execute_read(lambda tx: tx.run(cypher, parameters or {}))
-                return [dict(r) for r in result]
+                def _fn(tx):  # type: ignore[no-untyped-def]
+                    return [dict(r) for r in tx.run(cypher, parameters or {})]
+
+                return session.execute_read(_fn)
         except Neo4jError as e:
             raise RuntimeError("Neo4j read query failed.") from e

@@ -80,30 +80,16 @@ class RAGPipeline:
             if not settings.gemini_api_key:
                 raise RuntimeError("GEMINI_API_KEY is required for answer synthesis.")
             model = (settings.rag_gemini_model or "gemini-1.5-flash-latest").strip()
-            url = self._gemini_generate_url(model=model, api_key=settings.gemini_api_key)
-            try:
-                resp = httpx.post(
-                    url,
-                    json={
-                        "systemInstruction": {"parts": [{"text": system}]},
-                        "contents": [{"role": "user", "parts": [{"text": user}]}],
-                        "generationConfig": {"temperature": 0.2, "maxOutputTokens": 900},
-                    },
-                    timeout=180.0,
-                )
-            except httpx.RequestError as e:
-                raise RuntimeError("Gemini synthesis request failed. Ensure GEMINI_API_KEY is valid.") from e
-            if resp.status_code == 404 and "not found" in (resp.text or "").lower():
-                model2 = self._pick_gemini_model(api_key=settings.gemini_api_key)
-                resp = httpx.post(
-                    self._gemini_generate_url(model=model2, api_key=settings.gemini_api_key),
-                    json={
-                        "systemInstruction": {"parts": [{"text": system}]},
-                        "contents": [{"role": "user", "parts": [{"text": user}]}],
-                        "generationConfig": {"temperature": 0.2, "maxOutputTokens": 900},
-                    },
-                    timeout=180.0,
-                )
+            payload = {
+                "systemInstruction": {"parts": [{"text": system}]},
+                "contents": [{"role": "user", "parts": [{"text": user}]}],
+                "generationConfig": {"temperature": 0.2, "maxOutputTokens": 900},
+            }
+            resp = self._gemini_generate_with_retries(
+                model=model,
+                api_key=settings.gemini_api_key,
+                payload=payload,
+            )
             if resp.status_code != 200:
                 raise RuntimeError(f"Gemini synthesis failed with status {resp.status_code}: {resp.text[:300]}")
             payload = resp.json()
@@ -230,6 +216,34 @@ class RAGPipeline:
         if preferred:
             return preferred[0]
         return candidates[0]
+
+    def _gemini_generate_with_retries(self, *, model: str, api_key: str, payload: dict) -> httpx.Response:
+        url = self._gemini_generate_url(model=model, api_key=api_key)
+        resp = self._gemini_post_with_retries(url=url, payload=payload)
+        if resp.status_code == 404 and "not found" in (resp.text or "").lower():
+            model2 = self._pick_gemini_model(api_key=api_key)
+            url2 = self._gemini_generate_url(model=model2, api_key=api_key)
+            resp = self._gemini_post_with_retries(url=url2, payload=payload)
+        return resp
+
+    def _gemini_post_with_retries(self, *, url: str, payload: dict, max_attempts: int = 4) -> httpx.Response:
+        last_resp: httpx.Response | None = None
+        for attempt in range(1, max_attempts + 1):
+            try:
+                resp = httpx.post(url, json=payload, timeout=180.0)
+            except httpx.RequestError:
+                if attempt == max_attempts:
+                    raise RuntimeError("Gemini synthesis request failed after retries.")
+                time.sleep(min(2 ** (attempt - 1), 8))
+                continue
+            last_resp = resp
+            if resp.status_code in {429, 503} and attempt < max_attempts:
+                time.sleep(min(2 ** (attempt - 1), 8))
+                continue
+            return resp
+        if last_resp is not None:
+            return last_resp
+        raise RuntimeError("Gemini synthesis request failed without a response.")
 
     def _pick_ollama_model(self, *, host: str) -> str:
         try:

@@ -128,6 +128,10 @@ def main() -> None:
         extractor = EntityExtractor()
 
         total_relations = 0
+        total_chunks = 0
+        parse_failures = 0
+        request_failures = 0
+        failure_examples: list[str] = []
         for paper in papers:
             paper_id = str(paper["arxiv_id"])
             title = str(paper.get("title", "")).strip() or None
@@ -175,21 +179,45 @@ def main() -> None:
                     text = str(item.get("text", "") or "").strip()
                     if chunk_index < 0 or not text:
                         continue
-                    rels = extractor.extract_from_chunk(
-                        paper_id=paper_id,
-                        paper_title=title,
-                        paper_authors=[str(a or "").strip() for a in authors if str(a or "").strip()]
-                        if isinstance(authors, list)
-                        else None,
-                        chunk_index=chunk_index,
-                        chunk_text=text,
-                    )
-                    relations.extend(rels)
+                    total_chunks += 1
+                    try:
+                        rels = extractor.extract_from_chunk(
+                            paper_id=paper_id,
+                            paper_title=title,
+                            paper_authors=[str(a or "").strip() for a in authors if str(a or "").strip()]
+                            if isinstance(authors, list)
+                            else None,
+                            chunk_index=chunk_index,
+                            chunk_text=text,
+                        )
+                        relations.extend(rels)
+                    except RuntimeError as e:
+                        msg = str(e)
+                        if "parse json" in msg.lower():
+                            parse_failures += 1
+                        else:
+                            request_failures += 1
+                        if len(failure_examples) < 3:
+                            failure_examples.append(msg[:220])
+                        continue
 
                 writer.write_relations(relations=relations)
                 total_relations += len(relations)
                 print(f"Wrote paper={paper_id} relations={len(relations)} total_relations={total_relations}")
 
+        if not bool(getattr(args, "skip_extraction", False)):
+            print(
+                json.dumps(
+                    {
+                        "graph_extraction_total_chunks": total_chunks,
+                        "graph_extraction_parse_failures": parse_failures,
+                        "graph_extraction_request_failures": request_failures,
+                        "graph_extraction_total_relations": total_relations,
+                        "graph_extraction_failure_examples": failure_examples,
+                    },
+                    ensure_ascii=False,
+                )
+            )
         client.close()
 
     if args.command == "graph-health":

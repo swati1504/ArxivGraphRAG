@@ -40,6 +40,7 @@ class Settings(BaseSettings):
 
     graph_provider: str = Field(default="gemini", alias="GRAPH_PROVIDER")
     graph_gemini_model: str = Field(default="gemini-1.5-flash-latest", alias="GRAPH_GEMINI_MODEL")
+    graph_ollama_model: str = Field(default="", alias="GRAPH_OLLAMA_MODEL")
 
     eval_provider: str = Field(default="gemini", alias="EVAL_PROVIDER")
     eval_gemini_model: str = Field(default="gemini-1.5-flash-latest", alias="EVAL_GEMINI_MODEL")

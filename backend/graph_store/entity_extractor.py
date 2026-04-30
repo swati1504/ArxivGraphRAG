@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import json
 import re
+import time
 from typing import Any
 
 import httpx
@@ -11,6 +12,7 @@ from backend.graph_store.graph_writer import ExtractedRelation, NodeRef
 
 
 _JSON_BLOCK = re.compile(r"\{[\s\S]*\}")
+_CONTROL_CHARS = re.compile(r"[\x00-\x08\x0b\x0c\x0e-\x1f]")
 
 
 class EntityExtractor:
@@ -28,39 +30,129 @@ class EntityExtractor:
         chunk_text: str,
     ) -> list[ExtractedRelation]:
         provider = (self._settings.graph_provider or "").strip().lower()
-        if provider != "gemini":
-            raise RuntimeError(f"Unsupported GRAPH_PROVIDER: {self._settings.graph_provider}")
-        if not self._settings.gemini_api_key:
-            raise RuntimeError("GEMINI_API_KEY is required for graph extraction (Gemini).")
-
-        model = (self._settings.graph_gemini_model or "gemini-1.5-flash-latest").strip()
-        url = self._gemini_generate_url(model=model, api_key=self._settings.gemini_api_key)
-
-        system = (
-            "Extract a small, high-precision knowledge graph from the given research paper text chunk. "
-            "Return JSON only."
-        )
+        system = "Extract a small, high-precision knowledge graph from the given research paper text chunk. Return JSON only."
         user = self._build_user_prompt(paper_id=paper_id, paper_title=paper_title, chunk_text=chunk_text)
-        payload = {
-            "systemInstruction": {"parts": [{"text": system}]},
-            "contents": [{"role": "user", "parts": [{"text": user}]}],
-            "generationConfig": {"temperature": 0.1, "maxOutputTokens": 700},
-        }
 
-        try:
-            resp = self._client.post(url, json=payload)
-        except httpx.RequestError as e:
-            raise RuntimeError("Gemini graph extraction request failed.") from e
-        if resp.status_code == 404 and "not found" in (resp.text or "").lower():
-            model2 = self._pick_gemini_model(api_key=self._settings.gemini_api_key)
-            resp = self._client.post(self._gemini_generate_url(model=model2, api_key=self._settings.gemini_api_key), json=payload)
-        if resp.status_code != 200:
-            raise RuntimeError(f"Gemini graph extraction failed with status {resp.status_code}: {resp.text[:300]}")
+        if provider == "ollama":
+            text = self._ollama_generate(system=system, user=user)
+            try:
+                data = self._parse_json(text)
+            except Exception:
+                return []
+        else:
+            if provider != "gemini":
+                raise RuntimeError(f"Unsupported GRAPH_PROVIDER: {self._settings.graph_provider}")
+            if not self._settings.gemini_api_key:
+                raise RuntimeError("GEMINI_API_KEY is required for graph extraction (Gemini).")
 
-        text = self._extract_text(resp.json())
-        data = self._parse_json(text)
+            model = (self._settings.graph_gemini_model or "gemini-1.5-flash-latest").strip()
+            url = self._gemini_generate_url(model=model, api_key=self._settings.gemini_api_key)
+            payload = {
+                "systemInstruction": {"parts": [{"text": system}]},
+                "contents": [{"role": "user", "parts": [{"text": user}]}],
+                "generationConfig": {"temperature": 0.1, "maxOutputTokens": 700, "responseMimeType": "application/json"},
+            }
+
+            resp = self._post_with_retry(url=url, json_payload=payload)
+            if resp.status_code == 404 and "not found" in (resp.text or "").lower():
+                model2 = self._pick_gemini_model(api_key=self._settings.gemini_api_key)
+                resp = self._post_with_retry(
+                    url=self._gemini_generate_url(model=model2, api_key=self._settings.gemini_api_key),
+                    json_payload=payload,
+                )
+            if resp.status_code != 200:
+                raise RuntimeError(f"Gemini graph extraction failed with status {resp.status_code}: {resp.text[:300]}")
+
+            text = self._extract_text(resp.json())
+            try:
+                data = self._parse_json(text)
+            except Exception:
+                payload2 = {
+                    "systemInstruction": {
+                        "parts": [
+                            {
+                                "text": system
+                                + " Output must be strictly valid JSON with no trailing commas, no comments, and no markdown.",
+                            }
+                        ]
+                    },
+                    "contents": [{"role": "user", "parts": [{"text": user}]}],
+                    "generationConfig": {"temperature": 0.0, "maxOutputTokens": 600, "responseMimeType": "application/json"},
+                }
+                resp2 = self._post_with_retry(url=url, json_payload=payload2)
+                if resp2.status_code == 200:
+                    try:
+                        text2 = self._extract_text(resp2.json())
+                        data = self._parse_json(text2)
+                    except Exception:
+                        return []
+                else:
+                    return []
         author_map = self._author_key_map(paper_authors or [])
         return self._to_relations(paper_id=paper_id, chunk_index=chunk_index, payload=data, author_map=author_map)
+
+    def _post_with_retry(self, *, url: str, json_payload: dict[str, Any]) -> httpx.Response:
+        last: Exception | None = None
+        for attempt in range(5):
+            try:
+                resp = self._client.post(url, json=json_payload)
+            except httpx.RequestError as e:
+                last = e
+                time.sleep(min(8.0, 1.0 * (2**attempt)))
+                continue
+            if resp.status_code in {429, 503}:
+                ra = resp.headers.get("retry-after")
+                try:
+                    wait_s = float(ra) if ra else min(8.0, 1.0 * (2**attempt))
+                except Exception:
+                    wait_s = min(8.0, 1.0 * (2**attempt))
+                time.sleep(wait_s)
+                continue
+            return resp
+        if last is not None:
+            raise RuntimeError("Gemini graph extraction request failed.") from last
+        return resp
+
+    def _ollama_generate(self, *, system: str, user: str) -> str:
+        host = (self._settings.ollama_host or "http://localhost:11434").rstrip("/")
+        model = (self._settings.graph_ollama_model or "").strip() or (self._settings.rag_ollama_model or "").strip()
+        if not model:
+            model = self._pick_ollama_model(host=host)
+        prompt = f"System:\n{system}\n\nUser:\n{user}\n"
+        try:
+            resp = self._client.post(
+                f"{host}/api/generate",
+                json={"model": model, "prompt": prompt, "stream": False, "options": {"temperature": 0.1}},
+                timeout=180.0,
+            )
+        except httpx.RequestError as e:
+            raise RuntimeError("Ollama graph extraction request failed.") from e
+        if resp.status_code != 200:
+            raise RuntimeError(f"Ollama graph extraction failed with status {resp.status_code}: {resp.text[:300]}")
+        payload = resp.json()
+        return str(payload.get("response") or "").strip()
+
+    def _pick_ollama_model(self, *, host: str) -> str:
+        try:
+            resp = self._client.get(f"{host}/api/tags", timeout=20.0)
+        except httpx.RequestError as e:
+            raise RuntimeError("Ollama is not reachable.") from e
+        if resp.status_code != 200:
+            raise RuntimeError(f"Failed to list Ollama models: {resp.status_code}")
+        payload = resp.json()
+        models = payload.get("models") if isinstance(payload, dict) else None
+        if not isinstance(models, list) or not models:
+            raise RuntimeError("No Ollama models installed.")
+        for m in models:
+            if not isinstance(m, dict):
+                continue
+            name = str(m.get("name") or "").strip()
+            if not name:
+                continue
+            if "embed" in name.lower():
+                continue
+            return name
+        raise RuntimeError("No non-embedding Ollama model installed.")
 
     def _build_user_prompt(self, *, paper_id: str, paper_title: str | None, chunk_text: str) -> str:
         title = (paper_title or "").strip()
@@ -71,7 +163,7 @@ class EntityExtractor:
             "entities": [{"type": "Concept|Method|Institution|Author", "name": "string"}],
             "relations": [
                 {
-                    "type": "PROPOSES|STUDIES|CITES|AFFILIATED_WITH",
+                    "type": "PROPOSES|STUDIES|CITES|CONTRADICTS|AFFILIATED_WITH",
                     "source": {"type": "Paper|Author|Institution|Concept|Method", "id": "paper_id_if_Paper", "name": "string_if_not_Paper"},
                     "target": {"type": "Paper|Author|Institution|Concept|Method", "id": "paper_id_if_Paper", "name": "string_if_not_Paper"},
                     "evidence": "short quote or paraphrase from the chunk",
@@ -110,22 +202,77 @@ class EntityExtractor:
 
     def _parse_json(self, text: str) -> dict[str, Any]:
         raw = (text or "").strip()
+        raw = raw.strip("`").strip()
+        raw = _CONTROL_CHARS.sub("", raw)
         try:
             data = json.loads(raw)
             if isinstance(data, dict):
                 return data
         except Exception:
             pass
+        candidates = self._json_candidates(raw)
+        for c in candidates:
+            try:
+                cleaned = self._clean_json(c)
+                data = json.loads(cleaned)
+            except Exception:
+                continue
+            if isinstance(data, dict):
+                return data
+        raise RuntimeError("Failed to parse JSON from Gemini graph extraction response.")
+
+    def _json_candidates(self, raw: str) -> list[str]:
+        out: list[str] = []
         m = _JSON_BLOCK.search(raw)
-        if not m:
-            raise RuntimeError("Failed to parse JSON from Gemini graph extraction response.")
-        try:
-            data = json.loads(m.group(0))
-        except Exception as e:
-            raise RuntimeError("Failed to parse JSON from Gemini graph extraction response.") from e
-        if not isinstance(data, dict):
-            raise RuntimeError("Gemini graph extraction JSON must be an object.")
-        return data
+        if m:
+            out.append(m.group(0))
+        out.extend(self._balanced_json_objects(raw))
+        seen: set[str] = set()
+        uniq: list[str] = []
+        for s in out:
+            v = (s or "").strip()
+            if not v or v in seen:
+                continue
+            seen.add(v)
+            uniq.append(v)
+        return uniq
+
+    def _balanced_json_objects(self, raw: str) -> list[str]:
+        s = raw
+        objs: list[str] = []
+        start = None
+        depth = 0
+        in_str = False
+        esc = False
+        for i, ch in enumerate(s):
+            if in_str:
+                if esc:
+                    esc = False
+                elif ch == "\\":
+                    esc = True
+                elif ch == '"':
+                    in_str = False
+                continue
+            if ch == '"':
+                in_str = True
+                continue
+            if ch == "{":
+                if depth == 0:
+                    start = i
+                depth += 1
+            elif ch == "}":
+                if depth > 0:
+                    depth -= 1
+                    if depth == 0 and start is not None:
+                        objs.append(s[start : i + 1])
+                        start = None
+        return objs
+
+    def _clean_json(self, s: str) -> str:
+        v = (s or "").strip()
+        v = v.replace("\ufeff", "").strip()
+        v = re.sub(r",\s*([}\]])", r"\1", v)
+        return v
 
     def _to_relations(
         self,

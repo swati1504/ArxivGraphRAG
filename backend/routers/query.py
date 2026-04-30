@@ -21,7 +21,8 @@ _log = logging.getLogger("arxiv_graphrag.metrics")
 
 _rag_pipeline: RAGPipeline | None = None
 _graphrag_pipeline: GraphRAGPipeline | None = None
-_agent_pipeline: AgentPipeline | None = None
+_agent_pipeline = None
+_agent_pipeline_key: tuple[str, ...] | None = None
 
 
 def _get_rag_pipeline() -> RAGPipeline:
@@ -144,16 +145,30 @@ def _get_graphrag_pipeline() -> GraphRAGPipeline:
     return _graphrag_pipeline
 
 
-def _get_agent_pipeline() -> AgentPipeline:
-    global _agent_pipeline
-    if _agent_pipeline is not None:
-        return _agent_pipeline
-
+def _get_agent_pipeline():
+    global _agent_pipeline, _agent_pipeline_key
     settings = get_settings()
+    key = (
+        str(settings.pinecone_index_name or ""),
+        str(settings.pinecone_namespace or ""),
+        str(settings.embeddings_provider or ""),
+        str(settings.embeddings_model or ""),
+        str(settings.embeddings_dim or ""),
+        str(settings.neo4j_uri or ""),
+        str(settings.neo4j_username or ""),
+        str(settings.neo4j_database or ""),
+        str(settings.rag_provider or ""),
+        str(settings.rag_ollama_model or ""),
+        str(settings.rag_gemini_model or ""),
+    )
+    if _agent_pipeline is not None and _agent_pipeline_key == key:
+        return _agent_pipeline
+    _agent_pipeline_key = key
     rag_provider = (settings.rag_provider or "").strip().lower()
     if rag_provider == "anthropic" and not settings.anthropic_api_key:
         raise HTTPException(status_code=500, detail="ANTHROPIC_API_KEY is required")
     if rag_provider == "gemini" and not settings.gemini_api_key:
+        raise HTTPException(status_code=500, detail="GEMINI_API_KEY is required")
         raise HTTPException(status_code=500, detail="GEMINI_API_KEY is required")
     if not settings.pinecone_api_key:
         raise HTTPException(status_code=500, detail="PINECONE_API_KEY is required")
@@ -205,17 +220,30 @@ def _get_agent_pipeline() -> AgentPipeline:
             )
             neo4j.verify_connectivity()
             graph_retriever = GraphRetriever(neo4j=neo4j, chunk_store=chunk_store)
-        except Exception:
+        except Exception as e:
+            _log.warning("Graph retriever unavailable; falling back to vector-only: %s", e)
             graph_retriever = None
 
-    _agent_pipeline = AgentPipeline(
-        vector_retriever=retriever,
-        pinecone_index=index,
-        namespace=settings.pinecone_namespace,
-        rag=rag,
-        graph_retriever=graph_retriever,
-        chunk_store=chunk_store,
-    )
+    try:
+        from backend.pipelines.langgraph_agent import LangGraphAgentPipeline
+
+        _agent_pipeline = LangGraphAgentPipeline(
+            vector_retriever=retriever,
+            pinecone_index=index,
+            namespace=settings.pinecone_namespace,
+            rag=rag,
+            graph_retriever=graph_retriever,
+            chunk_store=chunk_store,
+        )
+    except Exception:
+        _agent_pipeline = AgentPipeline(
+            vector_retriever=retriever,
+            pinecone_index=index,
+            namespace=settings.pinecone_namespace,
+            rag=rag,
+            graph_retriever=graph_retriever,
+            chunk_store=chunk_store,
+        )
     return _agent_pipeline
 
 

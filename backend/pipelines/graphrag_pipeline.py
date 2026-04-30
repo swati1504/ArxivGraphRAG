@@ -181,7 +181,9 @@ class GraphRAGPipeline:
             "You are given BOTH text passages and graph relationships extracted from those passages. "
             "Use graph relationships to organize the answer into clusters (methods, concepts, influence chains). "
             "If any CONTRADICTS relationships appear, surface them explicitly as contested findings. "
-            "Cite claims with brackets like [paper_id:chunk_index]."
+            "Cite claims with brackets like [paper_id:chunk_index]. "
+            "Do not ask follow-up questions. Do not add extra sections like 'Do you want me to...'. "
+            "Every paragraph must include at least one citation."
         )
         user = (
             f"Question:\n{question}\n\n"

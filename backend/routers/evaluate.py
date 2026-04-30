@@ -58,7 +58,12 @@ def evaluate(payload: EvaluateRequest) -> EvaluateResponse:
         )
         rag = RAGPipeline(retriever=retriever)
 
-        neo4j = Neo4jClient(uri=settings.neo4j_uri, username=settings.neo4j_username, password=settings.neo4j_password)
+        neo4j = Neo4jClient(
+            uri=settings.neo4j_uri,
+            username=settings.neo4j_username,
+            password=settings.neo4j_password,
+            database=(settings.neo4j_database or "").strip() or None,
+        )
         neo4j.verify_connectivity()
         graphrag = GraphRAGPipeline(
             vector_retriever=retriever,

@@ -54,6 +54,7 @@ def _build_parser() -> argparse.ArgumentParser:
     graph.add_argument("--chunks-dir", type=str, default="data/processed/chunks")
     graph.add_argument("--limit-papers", type=int, default=0)
     graph.add_argument("--max-chunks-per-paper", type=int, default=18)
+    graph.add_argument("--skip-extraction", action="store_true", default=False)
 
     health = sub.add_parser("graph-health", help="Run basic graph health checks in Neo4j")
     health.add_argument("--neo4j-db", type=str, default=None)
@@ -114,7 +115,13 @@ def main() -> None:
         chunks_dir = Path(args.chunks_dir)
         max_chunks = int(getattr(args, "max_chunks_per_paper", 12) or 12)
 
-        client = Neo4jClient(uri=settings.neo4j_uri, username=settings.neo4j_username, password=settings.neo4j_password)
+        db = (getattr(args, "neo4j_db", None) or settings.neo4j_database or "").strip() or None
+        client = Neo4jClient(
+            uri=settings.neo4j_uri,
+            username=settings.neo4j_username,
+            password=settings.neo4j_password,
+            database=db,
+        )
         client.verify_connectivity()
         writer = GraphWriter(client=client)
         writer.ensure_schema()
@@ -159,26 +166,29 @@ def main() -> None:
                 continue
             chunk_payload = _sample_items(chunk_payload, k=max_chunks)
 
-            relations = []
-            for item in chunk_payload:
-                if not isinstance(item, dict):
-                    continue
-                chunk_index = int(item.get("chunk_index", -1))
-                text = str(item.get("text", "") or "").strip()
-                if chunk_index < 0 or not text:
-                    continue
-                rels = extractor.extract_from_chunk(
-                    paper_id=paper_id,
-                    paper_title=title,
-                    paper_authors=[str(a or "").strip() for a in authors if str(a or "").strip()] if isinstance(authors, list) else None,
-                    chunk_index=chunk_index,
-                    chunk_text=text,
-                )
-                relations.extend(rels)
+            if not bool(getattr(args, "skip_extraction", False)):
+                relations = []
+                for item in chunk_payload:
+                    if not isinstance(item, dict):
+                        continue
+                    chunk_index = int(item.get("chunk_index", -1))
+                    text = str(item.get("text", "") or "").strip()
+                    if chunk_index < 0 or not text:
+                        continue
+                    rels = extractor.extract_from_chunk(
+                        paper_id=paper_id,
+                        paper_title=title,
+                        paper_authors=[str(a or "").strip() for a in authors if str(a or "").strip()]
+                        if isinstance(authors, list)
+                        else None,
+                        chunk_index=chunk_index,
+                        chunk_text=text,
+                    )
+                    relations.extend(rels)
 
-            writer.write_relations(relations=relations)
-            total_relations += len(relations)
-            print(f"Wrote paper={paper_id} relations={len(relations)} total_relations={total_relations}")
+                writer.write_relations(relations=relations)
+                total_relations += len(relations)
+                print(f"Wrote paper={paper_id} relations={len(relations)} total_relations={total_relations}")
 
         client.close()
 
@@ -186,7 +196,13 @@ def main() -> None:
         settings = get_settings()
         if not settings.neo4j_uri or not settings.neo4j_username or not settings.neo4j_password:
             raise RuntimeError("NEO4J_URI, NEO4J_USERNAME, and NEO4J_PASSWORD are required for graph health checks.")
-        client = Neo4jClient(uri=settings.neo4j_uri, username=settings.neo4j_username, password=settings.neo4j_password)
+        db = (getattr(args, "neo4j_db", None) or settings.neo4j_database or "").strip() or None
+        client = Neo4jClient(
+            uri=settings.neo4j_uri,
+            username=settings.neo4j_username,
+            password=settings.neo4j_password,
+            database=db,
+        )
         client.verify_connectivity()
 
         checks = [

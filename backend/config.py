@@ -24,6 +24,7 @@ class Settings(BaseSettings):
     neo4j_uri: str | None = Field(default=None, alias="NEO4J_URI")
     neo4j_username: str | None = Field(default=None, alias="NEO4J_USERNAME")
     neo4j_password: str | None = Field(default=None, alias="NEO4J_PASSWORD")
+    neo4j_database: str = Field(default="", alias="NEO4J_DATABASE")
 
     embeddings_provider: str = Field(default="ollama", alias="EMBEDDINGS_PROVIDER")
     embeddings_model: str = Field(default="nomic-embed-text", alias="EMBEDDINGS_MODEL")

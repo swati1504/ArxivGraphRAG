@@ -171,7 +171,9 @@ class RAGPipeline:
         system = (
             "You answer questions using only the provided sources. "
             "If the sources are insufficient, say what is missing. "
-            "Cite claims with brackets like [paper_id:chunk_index]."
+            "Cite claims with brackets like [paper_id:chunk_index]. "
+            "Do not ask follow-up questions. Do not add extra sections like 'Do you want me to...'. "
+            "Every paragraph must include at least one citation."
         )
         user = f"Question:\n{question}\n\nSources:\n{context_block}"
         return system, user

@@ -7,6 +7,7 @@ from backend.evaluation.ragas_evaluator import LLMJudge
 from backend.graph_store.graph_retriever import GraphRetriever
 from backend.graph_store.neo4j_client import Neo4jClient
 from backend.ingestion.embedder import build_embedder
+from backend.observability import get_trace_id, ls_span, ls_update_current
 from backend.pipelines.agent_pipeline import AgentPipeline
 from backend.pipelines.graphrag_pipeline import GraphRAGPipeline
 from backend.pipelines.rag_pipeline import RAGPipeline
@@ -123,63 +124,114 @@ def evaluate(payload: EvaluateRequest) -> EvaluateResponse:
                 chunk_store=chunk_store,
             )
 
-    for q in qs:
-        rag_resp = rag.run(question=q.question, top_k=payload.top_k)
-        graphrag_resp = graphrag.run(question=q.question, top_k=payload.top_k)
-        rag_resps.append(rag_resp)
-        graphrag_resps.append(graphrag_resp)
+    with ls_span(
+        name="evaluate_run",
+        run_type="chain",
+        inputs={
+            "questions_path": payload.questions_path,
+            "top_k": int(payload.top_k),
+            "limit": int(payload.limit or 0),
+            "include_llm_judge": bool(payload.include_llm_judge),
+            "include_agent": bool(payload.include_agent),
+        },
+        metadata={"pipeline": "evaluate", "questions": len(qs)},
+    ):
+        for q in qs:
+            with ls_span(
+                name="evaluate_question",
+                run_type="chain",
+                inputs={"id": q.id, "category": q.category},
+            ):
+                rag_resp = rag.run(question=q.question, top_k=payload.top_k)
+                graphrag_resp = graphrag.run(question=q.question, top_k=payload.top_k)
+                rag_resps.append(rag_resp)
+                graphrag_resps.append(graphrag_resp)
 
-        rag_j = None
-        graphrag_j = None
-        agent_resp = None
-        agent_j = None
+                rag_j = None
+                graphrag_j = None
+                agent_resp = None
+                agent_j = None
 
-        if agent_pipeline is not None:
-            agent_resp = agent_pipeline.run(question=q.question, top_k=payload.top_k)
-            agent_resps.append(agent_resp)
-        if judge is not None:
-            rag_papers = [c.citation.paper_id for c in rag_resp.contexts if c.citation.paper_id]
-            graphrag_papers = [c.citation.paper_id for c in graphrag_resp.contexts if c.citation.paper_id]
-            rag_j = judge.score(
-                question=q.question,
-                answer=rag_resp.answer,
-                contexts=[c.text for c in rag_resp.contexts],
-                reference_answer=q.reference_answer,
-                reference_paper_ids=q.reference_paper_ids,
-                retrieved_paper_ids=rag_papers,
-            )
-            graphrag_j = judge.score(
-                question=q.question,
-                answer=graphrag_resp.answer,
-                contexts=[c.text for c in graphrag_resp.contexts],
-                reference_answer=q.reference_answer,
-                reference_paper_ids=q.reference_paper_ids,
-                retrieved_paper_ids=graphrag_papers,
-            )
+                if agent_pipeline is not None:
+                    agent_resp = agent_pipeline.run(question=q.question, top_k=payload.top_k)
+                    agent_resps.append(agent_resp)
+                if judge is not None:
+                    rag_papers = [c.citation.paper_id for c in rag_resp.contexts if c.citation.paper_id]
+                    graphrag_papers = [c.citation.paper_id for c in graphrag_resp.contexts if c.citation.paper_id]
+                    with ls_span(name="judge_score_rag", run_type="llm", metadata={"eval.target": "rag"}):
+                        rag_j = judge.score(
+                            question=q.question,
+                            answer=rag_resp.answer,
+                            contexts=[c.text for c in rag_resp.contexts],
+                            reference_answer=q.reference_answer,
+                            reference_paper_ids=q.reference_paper_ids,
+                            retrieved_paper_ids=rag_papers,
+                        )
+                    if rag_j is not None:
+                        ls_update_current(
+                            metadata={
+                                "judge.rag.faithfulness": rag_j.faithfulness,
+                                "judge.rag.answer_relevancy": rag_j.answer_relevancy,
+                                "judge.rag.context_precision": rag_j.context_precision,
+                                "judge.rag.context_recall": rag_j.context_recall,
+                                "judge.rag.answer_correctness": rag_j.answer_correctness,
+                            }
+                        )
 
-            if agent_resp is not None:
-                agent_papers = [c.citation.paper_id for c in agent_resp.contexts if c.citation.paper_id]
-                agent_j = judge.score(
-                    question=q.question,
-                    answer=agent_resp.answer,
-                    contexts=[c.text for c in agent_resp.contexts],
-                    reference_answer=q.reference_answer,
-                    reference_paper_ids=q.reference_paper_ids,
-                    retrieved_paper_ids=agent_papers,
+                    with ls_span(name="judge_score_graphrag", run_type="llm", metadata={"eval.target": "graphrag"}):
+                        graphrag_j = judge.score(
+                            question=q.question,
+                            answer=graphrag_resp.answer,
+                            contexts=[c.text for c in graphrag_resp.contexts],
+                            reference_answer=q.reference_answer,
+                            reference_paper_ids=q.reference_paper_ids,
+                            retrieved_paper_ids=graphrag_papers,
+                        )
+                    if graphrag_j is not None:
+                        ls_update_current(
+                            metadata={
+                                "judge.graphrag.faithfulness": graphrag_j.faithfulness,
+                                "judge.graphrag.answer_relevancy": graphrag_j.answer_relevancy,
+                                "judge.graphrag.context_precision": graphrag_j.context_precision,
+                                "judge.graphrag.context_recall": graphrag_j.context_recall,
+                                "judge.graphrag.answer_correctness": graphrag_j.answer_correctness,
+                            }
+                        )
+
+                    if agent_resp is not None:
+                        agent_papers = [c.citation.paper_id for c in agent_resp.contexts if c.citation.paper_id]
+                        with ls_span(name="judge_score_agent", run_type="llm", metadata={"eval.target": "agent"}):
+                            agent_j = judge.score(
+                                question=q.question,
+                                answer=agent_resp.answer,
+                                contexts=[c.text for c in agent_resp.contexts],
+                                reference_answer=q.reference_answer,
+                                reference_paper_ids=q.reference_paper_ids,
+                                retrieved_paper_ids=agent_papers,
+                            )
+                        if agent_j is not None:
+                            ls_update_current(
+                                metadata={
+                                    "judge.agent.faithfulness": agent_j.faithfulness,
+                                    "judge.agent.answer_relevancy": agent_j.answer_relevancy,
+                                    "judge.agent.context_precision": agent_j.context_precision,
+                                    "judge.agent.context_recall": agent_j.context_recall,
+                                    "judge.agent.answer_correctness": agent_j.answer_correctness,
+                                }
+                            )
+                results.append(
+                    EvaluatePerQuestion(
+                        id=q.id,
+                        category=q.category,
+                        question=q.question,
+                        rag=rag_resp,
+                        graphrag=graphrag_resp,
+                        agent=agent_resp,
+                        rag_judge=rag_j,
+                        graphrag_judge=graphrag_j,
+                        agent_judge=agent_j,
+                    )
                 )
-        results.append(
-            EvaluatePerQuestion(
-                id=q.id,
-                category=q.category,
-                question=q.question,
-                rag=rag_resp,
-                graphrag=graphrag_resp,
-                agent=agent_resp,
-                rag_judge=rag_j,
-                graphrag_judge=graphrag_j,
-                agent_judge=agent_j,
-            )
-        )
 
 
     if neo4j is not None:
@@ -237,4 +289,6 @@ def evaluate(payload: EvaluateRequest) -> EvaluateResponse:
         summary.graphrag_avg_answer_correctness = (sum(gr_ac) / len(gr_ac)) if gr_ac else None
         summary.agent_avg_answer_correctness = (sum(ag_ac) / len(ag_ac)) if ag_ac else None
 
-    return EvaluateResponse(results=results, summary=summary, warnings=warnings)
+    resp = EvaluateResponse(results=results, summary=summary, warnings=warnings)
+    resp.trace_id = get_trace_id()
+    return resp

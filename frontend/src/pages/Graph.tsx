@@ -43,6 +43,12 @@ function circleLayout(nodes: Node[], seedPaperIds: string[], w: number, h: numbe
   })
 }
 
+async function copyToClipboard(text: string) {
+  try {
+    await navigator.clipboard.writeText(text)
+  } catch {}
+}
+
 export function GraphPage() {
   const [question, setQuestion] = useState('Show the key concepts and citation relationships relevant to GraphRAG.')
   const [topK, setTopK] = useState(8)
@@ -147,6 +153,22 @@ export function GraphPage() {
                 <div className="metaItem">related papers {graph?.related_paper_ids?.length ?? 0}</div>
               </div>
             </div>
+            {resp.trace_id ? (
+              <div className="metaRow subtle">
+                <div className="metaItem">trace {resp.trace_id}</div>
+                <button
+                  className="btn"
+                  style={{ padding: '6px 10px', borderRadius: 8, fontSize: 12 }}
+                  onClick={() => copyToClipboard(resp.trace_id || '')}
+                  type="button"
+                >
+                  Copy
+                </button>
+                <a href="https://smith.langchain.com/" target="_blank" rel="noreferrer">
+                  Open LangSmith
+                </a>
+              </div>
+            ) : null}
             <div className="answerBox">{resp.answer}</div>
           </div>
 

@@ -43,7 +43,7 @@ class Settings(BaseSettings):
     graph_ollama_model: str = Field(default="", alias="GRAPH_OLLAMA_MODEL")
 
     eval_provider: str = Field(default="gemini", alias="EVAL_PROVIDER")
-    eval_gemini_model: str = Field(default="gemini-1.5-flash-latest", alias="EVAL_GEMINI_MODEL")
+    eval_gemini_model: str = Field(default="gemini-2.5-flash-lite", alias="EVAL_GEMINI_MODEL")
 
     ollama_host: str = Field(default="http://localhost:11434", alias="OLLAMA_HOST")
 

@@ -20,6 +20,12 @@ function formatScore(v: number | null | undefined): string {
   return v.toFixed(2)
 }
 
+async function copyToClipboard(text: string) {
+  try {
+    await navigator.clipboard.writeText(text)
+  } catch {}
+}
+
 type BarMetric = { key: string; label: string; value: number | null | undefined; fmt: (v: number | null | undefined) => string }
 
 function MetricBars(props: { title: string; metrics: BarMetric[] }) {
@@ -230,6 +236,22 @@ export function EvaluationPage() {
                 <div className="metaItem">questions {resp.results.length}</div>
               </div>
             </div>
+            {resp.trace_id ? (
+              <div className="metaRow subtle">
+                <div className="metaItem">trace {resp.trace_id}</div>
+                <button
+                  className="btn"
+                  style={{ padding: '6px 10px', borderRadius: 8, fontSize: 12 }}
+                  onClick={() => copyToClipboard(resp.trace_id || '')}
+                  type="button"
+                >
+                  Copy
+                </button>
+                <a href="https://smith.langchain.com/" target="_blank" rel="noreferrer">
+                  Open LangSmith
+                </a>
+              </div>
+            ) : null}
             <div className="tableWrap">
               <table className="table">
                 <thead>

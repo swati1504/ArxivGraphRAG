@@ -21,6 +21,12 @@ function totalCost(items: AgentTraceItem[]): number | null {
   return vals.reduce((a, b) => a + b, 0)
 }
 
+async function copyToClipboard(text: string) {
+  try {
+    await navigator.clipboard.writeText(text)
+  } catch {}
+}
+
 export function AgentTracePage() {
   const [question, setQuestion] = useState(
     'Compare two papers and explain any contradictions. Focus on citations and show the routing decision.'
@@ -112,6 +118,22 @@ export function AgentTracePage() {
                 <div className="metaItem">confidence {resp.confidence.toFixed(2)}</div>
               </div>
             </div>
+            {resp.trace_id ? (
+              <div className="metaRow subtle">
+                <div className="metaItem">trace {resp.trace_id}</div>
+                <button
+                  className="btn"
+                  style={{ padding: '6px 10px', borderRadius: 8, fontSize: 12 }}
+                  onClick={() => copyToClipboard(resp.trace_id || '')}
+                  type="button"
+                >
+                  Copy
+                </button>
+                <a href="https://smith.langchain.com/" target="_blank" rel="noreferrer">
+                  Open LangSmith
+                </a>
+              </div>
+            ) : null}
             <div className="subtle">{resp.routing_reason || '—'}</div>
             {resp.plan ? (
               <details className="details">

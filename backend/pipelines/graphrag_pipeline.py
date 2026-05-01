@@ -2,6 +2,7 @@ import time
 from dataclasses import dataclass
 
 from backend.graph_store.neo4j_client import Neo4jClient
+from backend.observability import ls_span, ls_update_current
 from backend.schemas.query import Citation, GraphDebug, GraphEdge, QueryResponse, RetrievedContext, UsageMetrics
 from backend.storage.chunk_store import ChunkStore
 from backend.vector_store.pinecone_client import PineconeIndex
@@ -40,23 +41,39 @@ class GraphRAGPipeline:
     def run(self, *, question: str, top_k: int) -> QueryResponse:
         start = time.perf_counter()
 
-        seed_contexts = self._vector_retriever.retrieve(question=question, top_k=top_k)
-        seed_papers = sorted({c.citation.paper_id for c in seed_contexts if c.citation.paper_id})
+        with ls_span(
+            name="graphrag_run",
+            run_type="chain",
+            inputs={"question_chars": len(question or ""), "top_k": int(top_k)},
+            metadata={"pipeline": "graphrag"},
+        ) as root_meta:
+            seed_contexts = self._vector_retriever.retrieve(question=question, top_k=top_k)
+            seed_papers = sorted({c.citation.paper_id for c in seed_contexts if c.citation.paper_id})
+            root_meta["retrieval.seed_chunks"] = len(seed_contexts)
+            root_meta["retrieval.seed_papers"] = len(seed_papers)
 
-        edges = self._fetch_graph_edges(seed_papers=seed_papers, limit=60)
-        related_papers = sorted(self._related_papers(seed_papers=seed_papers, edges=edges))[:12]
+            edges = self._fetch_graph_edges(seed_papers=seed_papers, limit=60)
+            related_papers = sorted(self._related_papers(seed_papers=seed_papers, edges=edges))[:12]
+            root_meta["retrieval.graph_edges"] = len(edges)
+            root_meta["retrieval.related_papers"] = len(related_papers)
 
-        graph_contexts = self._contexts_from_edges(edges)
+            graph_contexts = self._contexts_from_edges(edges)
+            root_meta["retrieval.graph_contexts"] = len(graph_contexts)
 
         extra_contexts: list[RetrievedContext] = []
         if related_papers:
-            qvec = self._vector_retriever.embed_query(question=question)
-            matches = self._index.query(
-                vector=qvec,
-                top_k=min(12, max(4, top_k)),
-                namespace=self._namespace,
-                filter={"paper_id": {"$in": related_papers}},
-            )
+            with ls_span(
+                name="vector_retrieve_related_papers",
+                run_type="retriever",
+                inputs={"related_papers": len(related_papers), "namespace": self._namespace},
+            ):
+                qvec = self._vector_retriever.embed_query(question=question)
+                matches = self._index.query(
+                    vector=qvec,
+                    top_k=min(12, max(4, top_k)),
+                    namespace=self._namespace,
+                    filter={"paper_id": {"$in": related_papers}},
+                )
             for m in matches:
                 md = m.metadata or {}
                 paper_id = str(md.get("paper_id", "")).strip()
@@ -78,7 +95,18 @@ class GraphRAGPipeline:
                     )
                 )
 
-        merged_contexts = self._dedupe_contexts(seed_contexts + graph_contexts + extra_contexts)
+        with ls_span(
+            name="merge_contexts",
+            run_type="chain",
+            metadata={
+                "retrieval.seed_chunks": len(seed_contexts),
+                "retrieval.graph_contexts": len(graph_contexts),
+                "retrieval.extra_chunks": len(extra_contexts),
+            },
+        ) as meta:
+            merged_contexts = self._dedupe_contexts(seed_contexts + graph_contexts + extra_contexts)
+            meta["retrieval.merged_contexts"] = len(merged_contexts)
+            ls_update_current(metadata={"retrieval.merged_contexts": len(merged_contexts)})
 
         graph_debug = GraphDebug(
             seed_paper_ids=seed_papers,
@@ -117,33 +145,38 @@ class GraphRAGPipeline:
     def _fetch_graph_edges(self, *, seed_papers: list[str], limit: int) -> list[GraphEdgeEvidence]:
         if not seed_papers:
             return []
-        rows = self._neo4j.run_read(
-            """
-            UNWIND $paper_ids AS pid
-            MATCH (p:Paper {id: pid})-[r]->(t)
-            WHERE type(r) IN ['PROPOSES','STUDIES','CITES','CONTRADICTS']
-            RETURN p.id AS source_paper_id,
-                   type(r) AS rel_type,
-                   labels(t)[0] AS target_type,
-                   coalesce(t.id, t.name, t.key) AS target_id_or_name,
-                   r.chunk_index AS chunk_index,
-                   r.evidence AS evidence,
-                   r.confidence AS confidence
-            UNION
-            UNWIND $paper_ids AS pid
-            MATCH (s:Paper)-[r]->(p:Paper {id: pid})
-            WHERE type(r) IN ['CITES','CONTRADICTS']
-            RETURN s.id AS source_paper_id,
-                   type(r) AS rel_type,
-                   'Paper' AS target_type,
-                   p.id AS target_id_or_name,
-                   r.chunk_index AS chunk_index,
-                   r.evidence AS evidence,
-                   r.confidence AS confidence
-            LIMIT $limit
-            """,
-            {"paper_ids": seed_papers, "limit": int(limit)},
-        )
+        with ls_span(
+            name="graph_fetch_edges",
+            run_type="retriever",
+            inputs={"seed_papers": len(seed_papers), "limit": int(limit)},
+        ):
+            rows = self._neo4j.run_read(
+                """
+                UNWIND $paper_ids AS pid
+                MATCH (p:Paper {id: pid})-[r]->(t)
+                WHERE type(r) IN ['PROPOSES','STUDIES','CITES','CONTRADICTS']
+                RETURN p.id AS source_paper_id,
+                       type(r) AS rel_type,
+                       labels(t)[0] AS target_type,
+                       coalesce(t.id, t.name, t.key) AS target_id_or_name,
+                       r.chunk_index AS chunk_index,
+                       r.evidence AS evidence,
+                       r.confidence AS confidence
+                UNION
+                UNWIND $paper_ids AS pid
+                MATCH (s:Paper)-[r]->(p:Paper {id: pid})
+                WHERE type(r) IN ['CITES','CONTRADICTS']
+                RETURN s.id AS source_paper_id,
+                       type(r) AS rel_type,
+                       'Paper' AS target_type,
+                       p.id AS target_id_or_name,
+                       r.chunk_index AS chunk_index,
+                       r.evidence AS evidence,
+                       r.confidence AS confidence
+                LIMIT $limit
+                """,
+                {"paper_ids": seed_papers, "limit": int(limit)},
+            )
         out: list[GraphEdgeEvidence] = []
         for row in rows:
             try:

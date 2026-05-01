@@ -2,6 +2,7 @@ import time
 from dataclasses import dataclass
 
 from backend.graph_store.neo4j_client import Neo4jClient
+from backend.observability import ls_span
 from backend.schemas.query import Citation, RetrievedContext
 from backend.storage.chunk_store import ChunkStore
 
@@ -43,33 +44,38 @@ class GraphRetriever:
                 latency_ms=int((time.perf_counter() - start) * 1000),
             )
 
-        rows = self._neo4j.run_read(
-            """
-            UNWIND $paper_ids AS pid
-            MATCH (p:Paper {id: pid})-[r]->(t)
-            WHERE type(r) IN ['PROPOSES','STUDIES','CITES','CONTRADICTS']
-            RETURN p.id AS source_paper_id,
-                   type(r) AS rel_type,
-                   labels(t)[0] AS target_type,
-                   coalesce(t.id, t.name, t.key) AS target_id_or_name,
-                   r.chunk_index AS chunk_index,
-                   r.evidence AS evidence,
-                   r.confidence AS confidence
-            UNION
-            UNWIND $paper_ids AS pid
-            MATCH (s:Paper)-[r]->(p:Paper {id: pid})
-            WHERE type(r) IN ['CITES','CONTRADICTS']
-            RETURN s.id AS source_paper_id,
-                   type(r) AS rel_type,
-                   'Paper' AS target_type,
-                   p.id AS target_id_or_name,
-                   r.chunk_index AS chunk_index,
-                   r.evidence AS evidence,
-                   r.confidence AS confidence
-            LIMIT $limit
-            """,
-            {"paper_ids": seed, "limit": int(limit_edges)},
-        )
+        with ls_span(
+            name="graph_expand",
+            run_type="retriever",
+            inputs={"seed_papers": len(seed), "limit_edges": int(limit_edges)},
+        ):
+            rows = self._neo4j.run_read(
+                """
+                UNWIND $paper_ids AS pid
+                MATCH (p:Paper {id: pid})-[r]->(t)
+                WHERE type(r) IN ['PROPOSES','STUDIES','CITES','CONTRADICTS']
+                RETURN p.id AS source_paper_id,
+                       type(r) AS rel_type,
+                       labels(t)[0] AS target_type,
+                       coalesce(t.id, t.name, t.key) AS target_id_or_name,
+                       r.chunk_index AS chunk_index,
+                       r.evidence AS evidence,
+                       r.confidence AS confidence
+                UNION
+                UNWIND $paper_ids AS pid
+                MATCH (s:Paper)-[r]->(p:Paper {id: pid})
+                WHERE type(r) IN ['CITES','CONTRADICTS']
+                RETURN s.id AS source_paper_id,
+                       type(r) AS rel_type,
+                       'Paper' AS target_type,
+                       p.id AS target_id_or_name,
+                       r.chunk_index AS chunk_index,
+                       r.evidence AS evidence,
+                       r.confidence AS confidence
+                LIMIT $limit
+                """,
+                {"paper_ids": seed, "limit": int(limit_edges)},
+            )
 
         edges: list[GraphEdge] = []
         for row in rows:
@@ -149,4 +155,3 @@ class GraphRetriever:
                 base += f" | {e.evidence}"
             lines.append(base)
         return lines
-

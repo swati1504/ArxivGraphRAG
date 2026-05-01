@@ -4,6 +4,7 @@ import httpx
 from anthropic import Anthropic
 
 from backend.config import get_settings
+from backend.observability import ls_span, ls_update_current
 from backend.schemas.query import QueryResponse, RetrievedContext, UsageMetrics
 from backend.vector_store.retriever import VectorRetriever
 
@@ -14,7 +15,14 @@ class RAGPipeline:
 
     def run(self, *, question: str, top_k: int) -> QueryResponse:
         start = time.perf_counter()
-        contexts = self._retriever.retrieve(question=question, top_k=top_k)
+        with ls_span(
+            name="rag_run",
+            run_type="chain",
+            inputs={"question_chars": len(question or ""), "top_k": int(top_k)},
+            metadata={"pipeline": "rag"},
+        ) as meta:
+            contexts = self._retriever.retrieve(question=question, top_k=top_k)
+            meta["retrieval.chunks_retrieved"] = len(contexts)
         return self.run_with_contexts(question=question, contexts=contexts, start=start)
 
     def run_with_contexts(
@@ -59,37 +67,61 @@ class RAGPipeline:
     def synthesize_with_prompt(self, *, system: str, user: str) -> tuple[str, dict]:
         settings = get_settings()
         provider = (settings.rag_provider or "").strip().lower()
+        model_name = None
         if provider == "anthropic":
             if not settings.anthropic_api_key:
                 raise RuntimeError("ANTHROPIC_API_KEY is required for answer synthesis.")
+            model_name = settings.rag_reasoning_model
             client = Anthropic(api_key=settings.anthropic_api_key)
-            msg = client.messages.create(
-                model=settings.rag_reasoning_model,
-                max_tokens=900,
-                temperature=0.2,
-                system=system,
-                messages=[{"role": "user", "content": user}],
-            )
+            with ls_span(
+                name="synthesize",
+                run_type="llm",
+                inputs={"system_chars": len(system or ""), "user_chars": len(user or "")},
+                metadata={"llm.provider": "anthropic", "llm.model": str(model_name or "")},
+            ):
+                msg = client.messages.create(
+                    model=settings.rag_reasoning_model,
+                    max_tokens=900,
+                    temperature=0.2,
+                    system=system,
+                    messages=[{"role": "user", "content": user}],
+                )
             answer = "".join([b.text for b in msg.content if getattr(b, "type", None) == "text"]).strip()
             prompt_tokens = getattr(getattr(msg, "usage", None), "input_tokens", None)
             completion_tokens = getattr(getattr(msg, "usage", None), "output_tokens", None)
             usage = self._usage_dict(prompt_tokens=prompt_tokens, completion_tokens=completion_tokens)
+            ls_update_current(
+                metadata={
+                    "llm.provider": "anthropic",
+                    "llm.model": str(model_name or ""),
+                    "llm.prompt_tokens": usage.get("prompt_tokens"),
+                    "llm.completion_tokens": usage.get("completion_tokens"),
+                    "llm.total_cost_usd": usage.get("total_cost_usd"),
+                }
+            )
             return answer, usage
 
         if provider == "gemini":
             if not settings.gemini_api_key:
                 raise RuntimeError("GEMINI_API_KEY is required for answer synthesis.")
             model = (settings.rag_gemini_model or "gemini-1.5-flash-latest").strip()
+            model_name = model
             payload = {
                 "systemInstruction": {"parts": [{"text": system}]},
                 "contents": [{"role": "user", "parts": [{"text": user}]}],
                 "generationConfig": {"temperature": 0.2, "maxOutputTokens": 900},
             }
-            resp = self._gemini_generate_with_retries(
-                model=model,
-                api_key=settings.gemini_api_key,
-                payload=payload,
-            )
+            with ls_span(
+                name="synthesize",
+                run_type="llm",
+                inputs={"system_chars": len(system or ""), "user_chars": len(user or "")},
+                metadata={"llm.provider": "gemini", "llm.model": model},
+            ):
+                resp = self._gemini_generate_with_retries(
+                    model=model,
+                    api_key=settings.gemini_api_key,
+                    payload=payload,
+                )
             if resp.status_code != 200:
                 raise RuntimeError(f"Gemini synthesis failed with status {resp.status_code}: {resp.text[:300]}")
             payload = resp.json()
@@ -105,40 +137,63 @@ class RAGPipeline:
             prompt_tokens = usage_meta.get("promptTokenCount") if isinstance(usage_meta, dict) else None
             completion_tokens = usage_meta.get("candidatesTokenCount") if isinstance(usage_meta, dict) else None
             usage = self._usage_dict(prompt_tokens=prompt_tokens, completion_tokens=completion_tokens)
+            ls_update_current(
+                metadata={
+                    "llm.provider": "gemini",
+                    "llm.model": model,
+                    "llm.prompt_tokens": usage.get("prompt_tokens"),
+                    "llm.completion_tokens": usage.get("completion_tokens"),
+                    "llm.total_cost_usd": usage.get("total_cost_usd"),
+                }
+            )
             return answer, usage
 
         host = (settings.ollama_host or "http://localhost:11434").rstrip("/")
         model = (settings.rag_ollama_model or "").strip()
         if not model:
             model = self._pick_ollama_model(host=host)
+        model_name = model
         prompt = f"System:\n{system}\n\nUser:\n{user}\n"
         try:
-            resp = httpx.post(
-                f"{host}/api/generate",
-                json={
-                    "model": model,
-                    "prompt": prompt,
-                    "stream": False,
-                    "options": {"temperature": 0.2},
-                },
-                timeout=180.0,
-            )
+            with ls_span(
+                name="synthesize",
+                run_type="llm",
+                inputs={"prompt_chars": len(prompt or "")},
+                metadata={"llm.provider": "ollama", "llm.model": model},
+            ):
+                resp = httpx.post(
+                    f"{host}/api/generate",
+                    json={
+                        "model": model,
+                        "prompt": prompt,
+                        "stream": False,
+                        "options": {"temperature": 0.2},
+                    },
+                    timeout=180.0,
+                )
         except httpx.RequestError as e:
             raise RuntimeError(
                 "Ollama generation request failed. Ensure Ollama is running and RAG_OLLAMA_MODEL is pulled."
             ) from e
         if resp.status_code == 404 and "not found" in (resp.text or "").lower():
             model2 = self._pick_ollama_model(host=host)
-            resp = httpx.post(
-                f"{host}/api/generate",
-                json={
-                    "model": model2,
-                    "prompt": prompt,
-                    "stream": False,
-                    "options": {"temperature": 0.2},
-                },
-                timeout=180.0,
-            )
+            with ls_span(
+                name="synthesize_retry",
+                run_type="llm",
+                inputs={"prompt_chars": len(prompt or "")},
+                metadata={"llm.provider": "ollama", "llm.model": model2},
+            ):
+                resp = httpx.post(
+                    f"{host}/api/generate",
+                    json={
+                        "model": model2,
+                        "prompt": prompt,
+                        "stream": False,
+                        "options": {"temperature": 0.2},
+                    },
+                    timeout=180.0,
+                )
+            model_name = model2
         if resp.status_code != 200:
             raise RuntimeError(f"Ollama generation failed with status {resp.status_code}: {resp.text[:300]}")
         payload = resp.json()
@@ -146,6 +201,15 @@ class RAGPipeline:
         prompt_tokens = payload.get("prompt_eval_count")
         completion_tokens = payload.get("eval_count")
         usage = self._usage_dict(prompt_tokens=prompt_tokens, completion_tokens=completion_tokens)
+        ls_update_current(
+            metadata={
+                "llm.provider": "ollama",
+                "llm.model": str(model_name or ""),
+                "llm.prompt_tokens": usage.get("prompt_tokens"),
+                "llm.completion_tokens": usage.get("completion_tokens"),
+                "llm.total_cost_usd": usage.get("total_cost_usd"),
+            }
+        )
         return answer, usage
 
     def _usage_dict(self, *, prompt_tokens, completion_tokens) -> dict:

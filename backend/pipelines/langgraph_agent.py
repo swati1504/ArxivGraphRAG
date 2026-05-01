@@ -3,6 +3,7 @@ from dataclasses import dataclass
 import re
 
 from backend.graph_store.graph_retriever import GraphRetriever
+from backend.observability import ls_span, ls_update_current
 from backend.pipelines.rag_pipeline import RAGPipeline
 from backend.schemas.agent import AgentPlan, AgentQueryResponse, AgentRetrievedContext, AgentTraceItem
 from backend.schemas.query import Citation, RetrievedContext, UsageMetrics
@@ -68,7 +69,13 @@ class LangGraphAgentPipeline:
             "answer": "",
             "usage": {},
         }
-        out = self._app.invoke(state)
+        with ls_span(
+            name="agent_run",
+            run_type="chain",
+            inputs={"question_chars": len(question or ""), "top_k": int(top_k)},
+            metadata={"pipeline": "agent", "engine": "langgraph"},
+        ):
+            out = self._app.invoke(state)
         decision: AgentDecision = out["decision"]
         plan: AgentPlan | None = out.get("plan")
         usage = out.get("usage") or {}
@@ -134,7 +141,15 @@ class LangGraphAgentPipeline:
         out = dict(state)
         t0 = time.perf_counter()
         q = str(state.get("question") or "")
-        decision = self._classify(question=q, graph_available=self._graph is not None)
+        with ls_span(name="agent_classify", run_type="chain", metadata={"graph_available": self._graph is not None}):
+            decision = self._classify(question=q, graph_available=self._graph is not None)
+        ls_update_current(
+            metadata={
+                "agent.route": decision.route,
+                "agent.query_type": decision.query_type,
+                "agent.confidence": float(decision.confidence),
+            }
+        )
         trace = list(state.get("trace") or [])
         trace.append(
             AgentTraceItem(
@@ -152,7 +167,8 @@ class LangGraphAgentPipeline:
         t0 = time.perf_counter()
         decision = out.get("decision")
         q = str(out.get("question") or "")
-        plan = self._plan(question=q, decision=decision, graph_available=self._graph is not None)
+        with ls_span(name="agent_plan", run_type="chain"):
+            plan = self._plan(question=q, decision=decision, graph_available=self._graph is not None)
         trace = list(out.get("trace") or [])
         trace.append(
             AgentTraceItem(
@@ -171,9 +187,13 @@ class LangGraphAgentPipeline:
         t0 = time.perf_counter()
         question = str(state.get("question") or "")
         top_k = int(state.get("top_k") or 8)
-        scored = self._vector_retriever.retrieve_scored(question=question, top_k=top_k)
+        with ls_span(name="agent_vector_retrieve", run_type="retriever", inputs={"top_k": int(top_k)}):
+            scored = self._vector_retriever.retrieve_scored(question=question, top_k=top_k)
         vector_contexts = [c for c, _ in scored]
         seed_papers = sorted({c.citation.paper_id for c in vector_contexts if c.citation.paper_id})
+        ls_update_current(
+            metadata={"retrieval.seed_papers": len(seed_papers), "retrieval.seed_chunks": len(vector_contexts)}
+        )
         trace = list(state.get("trace") or [])
         trace.append(
             AgentTraceItem(
@@ -206,22 +226,42 @@ class LangGraphAgentPipeline:
             return out
 
         seed_papers = list(state.get("seed_papers") or [])
-        g = self._graph.expand_from_seed_papers(seed_paper_ids=seed_papers, limit_edges=80)
+        with ls_span(
+            name="agent_graph_expand",
+            run_type="retriever",
+            inputs={"seed_papers": len(seed_papers), "limit_edges": 80},
+        ) as meta:
+            g = self._graph.expand_from_seed_papers(seed_paper_ids=seed_papers, limit_edges=80)
+            meta["retrieval.graph_edges"] = len(g.edges)
+            meta["retrieval.graph_contexts"] = len(g.contexts)
+            meta["retrieval.related_papers"] = len(g.related_paper_ids)
         graph_edges = self._graph.edges_to_lines(g.edges, limit=40)
         contested_claims = g.contested_claims
         graph_contexts = g.contexts
+        ls_update_current(
+            metadata={
+                "retrieval.graph_edges": len(g.edges),
+                "retrieval.graph_contexts": len(graph_contexts),
+                "retrieval.related_papers": len(g.related_paper_ids),
+            }
+        )
 
         extra_contexts: list[RetrievedContext] = []
         if g.related_paper_ids:
             question = str(state.get("question") or "")
             top_k = int(state.get("top_k") or 8)
-            qvec = self._vector_retriever.embed_query(question=question)
-            matches = self._index.query(
-                vector=qvec,
-                top_k=min(12, max(4, top_k)),
-                namespace=self._namespace,
-                filter={"paper_id": {"$in": g.related_paper_ids[:12]}},
-            )
+            with ls_span(
+                name="agent_vector_retrieve_filtered",
+                run_type="retriever",
+                inputs={"papers": min(12, len(g.related_paper_ids)), "namespace": self._namespace},
+            ):
+                qvec = self._vector_retriever.embed_query(question=question)
+                matches = self._index.query(
+                    vector=qvec,
+                    top_k=min(12, max(4, top_k)),
+                    namespace=self._namespace,
+                    filter={"paper_id": {"$in": g.related_paper_ids[:12]}},
+                )
             for m in matches:
                 md = m.metadata or {}
                 paper_id = str(md.get("paper_id", "")).strip()
@@ -241,6 +281,7 @@ class LangGraphAgentPipeline:
                         citation=Citation(paper_id=paper_id, title=md.get("title"), chunk_index=chunk_index),
                     )
                 )
+        ls_update_current(metadata={"retrieval.extra_chunks": len(extra_contexts)})
 
         trace.append(
             AgentTraceItem(
@@ -259,9 +300,24 @@ class LangGraphAgentPipeline:
     def _node_merge(self, state: dict) -> dict:
         out = dict(state)
         t0 = time.perf_counter()
-        merged = self._dedupe_contexts(
-            (state.get("vector_contexts") or []) + (state.get("graph_contexts") or []) + (state.get("extra_contexts") or [])
-        )
+        with ls_span(
+            name="agent_merge_contexts",
+            run_type="chain",
+            metadata={
+                "retrieval.seed_chunks": len(state.get("vector_contexts") or []),
+                "retrieval.graph_contexts": len(state.get("graph_contexts") or []),
+                "retrieval.extra_chunks": len(state.get("extra_contexts") or []),
+            },
+        ) as meta:
+            merged = self._dedupe_contexts(
+                (state.get("vector_contexts") or [])
+                + (state.get("graph_contexts") or [])
+                + (state.get("extra_contexts") or [])
+            )
+            meta["retrieval.merged_contexts"] = len(merged)
+            meta["retrieval.graph_edges_lines"] = len(state.get("graph_edges") or [])
+            meta["retrieval.contested_claims"] = len(state.get("contested_claims") or [])
+        ls_update_current(metadata={"retrieval.merged_contexts": len(merged)})
         agent_contexts = self._to_agent_contexts(
             vector_scored=state.get("vector_scored") or [],
             graph_contexts=state.get("graph_contexts") or [],
@@ -286,15 +342,24 @@ class LangGraphAgentPipeline:
         question = str(state.get("question") or "")
         merged: list[RetrievedContext] = state.get("merged_contexts") or []
         decision: AgentDecision = state["decision"]
-        system, user = self._build_prompt(
-            question=question,
-            contexts=merged,
-            graph_edges=state.get("graph_edges") or [],
-            contested_claims=state.get("contested_claims") or [],
-            route=decision.route,
-            prompt_style=str(state.get("prompt_style") or "concise_factual"),
-        )
-        answer, usage = self._rag.synthesize_with_prompt(system=system, user=user)
+        with ls_span(
+            name="agent_synthesize",
+            run_type="chain",
+            metadata={
+                "agent.route": decision.route,
+                "agent.prompt_style": str(state.get("prompt_style") or "concise_factual"),
+                "retrieval.merged_contexts": len(merged),
+            },
+        ):
+            system, user = self._build_prompt(
+                question=question,
+                contexts=merged,
+                graph_edges=state.get("graph_edges") or [],
+                contested_claims=state.get("contested_claims") or [],
+                route=decision.route,
+                prompt_style=str(state.get("prompt_style") or "concise_factual"),
+            )
+            answer, usage = self._rag.synthesize_with_prompt(system=system, user=user)
         trace = list(state.get("trace") or [])
         trace.append(
             AgentTraceItem(

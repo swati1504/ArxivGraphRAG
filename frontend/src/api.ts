@@ -43,6 +43,7 @@ export type QueryResponse = {
   contexts: RetrievedContext[]
   metrics: UsageMetrics
   graph?: GraphDebug | null
+  trace_id?: string | null
 }
 
 export type AgentPlan = {
@@ -82,6 +83,7 @@ export type AgentQueryResponse = {
   graph_edges: string[]
   metrics: UsageMetrics
   agent_trace: AgentTraceItem[]
+  trace_id?: string | null
 }
 
 export type JudgeMetrics = {
@@ -140,6 +142,7 @@ export type EvaluateResponse = {
   results: EvaluatePerQuestion[]
   summary: EvaluateSummary
   warnings: string[]
+  trace_id?: string | null
 }
 
 async function postJson<T>(path: string, payload: unknown, signal?: AbortSignal): Promise<T> {
@@ -175,4 +178,3 @@ export function queryAgent(payload: QueryRequest, signal?: AbortSignal) {
 export function evaluate(payload: EvaluateRequest, signal?: AbortSignal) {
   return postJson<EvaluateResponse>('/api/evaluate', payload, signal)
 }
-

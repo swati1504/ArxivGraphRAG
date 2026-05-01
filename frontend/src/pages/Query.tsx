@@ -22,9 +22,37 @@ function formatInt(v: number | null | undefined): string {
   return String(Math.round(v))
 }
 
+async function copyToClipboard(text: string) {
+  try {
+    await navigator.clipboard.writeText(text)
+  } catch {}
+}
+
+function TraceLine(props: { traceId?: string | null }) {
+  const id = (props.traceId || '').trim()
+  if (!id) return null
+  return (
+    <div className="metaRow subtle">
+      <div className="metaItem">trace {id}</div>
+      <button
+        className="btn"
+        style={{ padding: '6px 10px', borderRadius: 8, fontSize: 12 }}
+        onClick={() => copyToClipboard(id)}
+        type="button"
+      >
+        Copy
+      </button>
+      <a href="https://smith.langchain.com/" target="_blank" rel="noreferrer">
+        Open LangSmith
+      </a>
+    </div>
+  )
+}
+
 function AnswerCard(props: { title: string; resp?: QueryResponse | AgentQueryResponse; error?: string }) {
   const { title, resp, error } = props
   const metrics = resp?.metrics
+  const traceId = resp ? ('trace_id' in resp ? resp.trace_id : null) : null
   return (
     <div className="card">
       <div className="cardHeader">
@@ -38,6 +66,7 @@ function AnswerCard(props: { title: string; resp?: QueryResponse | AgentQueryRes
       {error && <div className="errorBox">{error}</div>}
       {resp && (
         <>
+          <TraceLine traceId={traceId} />
           {'graph' in resp && resp.graph?.edges ? (
             <div className="metaRow subtle">
               <div className="metaItem">graph edges {resp.graph.edges.length}</div>

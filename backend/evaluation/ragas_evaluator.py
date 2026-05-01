@@ -45,7 +45,7 @@ class LLMJudge:
             contexts=contexts,
             reference_answer=reference_answer,
         )
-        model = (self._settings.eval_gemini_model or "gemini-1.5-flash-latest").strip()
+        model = (self._settings.eval_gemini_model or "gemini-2.5-flash-lite").strip()
         url = self._gemini_generate_url(model=model, api_key=self._settings.gemini_api_key)
 
         try:
@@ -59,8 +59,24 @@ class LLMJudge:
             )
         except httpx.RequestError:
             return JudgeMetrics()
-        if resp.status_code != 200:
+        if resp.status_code != 200 and resp.status_code != 404:
             return JudgeMetrics()
+        if resp.status_code == 404:
+            fallback = (self._settings.rag_gemini_model or "gemini-2.5-flash-lite").strip()
+            if fallback and fallback != model:
+                try:
+                    resp = self._post_with_retries(
+                        url=self._gemini_generate_url(model=fallback, api_key=self._settings.gemini_api_key),
+                        payload={
+                            "systemInstruction": {"parts": [{"text": system}]},
+                            "contents": [{"role": "user", "parts": [{"text": user}]}],
+                            "generationConfig": {"temperature": 0.0, "maxOutputTokens": 350},
+                        },
+                    )
+                except httpx.RequestError:
+                    return JudgeMetrics()
+            if resp.status_code != 200:
+                return JudgeMetrics()
         text = self._extract_text(resp.json())
         data = self._parse_json(text)
         return JudgeMetrics(

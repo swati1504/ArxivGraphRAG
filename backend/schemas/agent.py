@@ -45,3 +45,4 @@ class AgentQueryResponse(BaseModel):
     graph_edges: list[str] = Field(default_factory=list)
     metrics: UsageMetrics
     agent_trace: list[AgentTraceItem]
+    trace_id: str | None = None

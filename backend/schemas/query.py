@@ -46,3 +46,4 @@ class QueryResponse(BaseModel):
     contexts: list[RetrievedContext]
     metrics: UsageMetrics
     graph: GraphDebug | None = None
+    trace_id: str | None = None

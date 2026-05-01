@@ -6,6 +6,7 @@ from backend.config import get_settings
 from backend.graph_store.graph_retriever import GraphRetriever
 from backend.graph_store.neo4j_client import Neo4jClient
 from backend.ingestion.embedder import build_embedder
+from backend.observability import get_trace_id
 from backend.pipelines.agent_pipeline import AgentPipeline
 from backend.pipelines.graphrag_pipeline import GraphRAGPipeline
 from backend.pipelines.rag_pipeline import RAGPipeline
@@ -251,6 +252,7 @@ def _get_agent_pipeline():
 def query_rag(payload: QueryRequest) -> QueryResponse:
     pipeline = _get_rag_pipeline()
     resp = pipeline.run(question=payload.question, top_k=payload.top_k)
+    resp.trace_id = get_trace_id()
     _log.info(
         json.dumps(
             {
@@ -260,6 +262,7 @@ def query_rag(payload: QueryRequest) -> QueryResponse:
                 "input_tokens": resp.metrics.prompt_tokens,
                 "output_tokens": resp.metrics.completion_tokens,
                 "cost_usd": resp.metrics.total_cost_usd,
+                "trace_id": resp.trace_id,
             },
             ensure_ascii=False,
         )
@@ -271,6 +274,7 @@ def query_rag(payload: QueryRequest) -> QueryResponse:
 def query_graphrag(payload: QueryRequest) -> QueryResponse:
     pipeline = _get_graphrag_pipeline()
     resp = pipeline.run(question=payload.question, top_k=payload.top_k)
+    resp.trace_id = get_trace_id()
     _log.info(
         json.dumps(
             {
@@ -280,6 +284,7 @@ def query_graphrag(payload: QueryRequest) -> QueryResponse:
                 "input_tokens": resp.metrics.prompt_tokens,
                 "output_tokens": resp.metrics.completion_tokens,
                 "cost_usd": resp.metrics.total_cost_usd,
+                "trace_id": resp.trace_id,
             },
             ensure_ascii=False,
         )
@@ -291,6 +296,7 @@ def query_graphrag(payload: QueryRequest) -> QueryResponse:
 def query_agent(payload: AgentQueryRequest) -> AgentQueryResponse:
     pipeline = _get_agent_pipeline()
     resp = pipeline.run(question=payload.question, top_k=payload.top_k)
+    resp.trace_id = get_trace_id()
     _log.info(
         json.dumps(
             {
@@ -302,6 +308,7 @@ def query_agent(payload: AgentQueryRequest) -> AgentQueryResponse:
                 "input_tokens": resp.metrics.prompt_tokens,
                 "output_tokens": resp.metrics.completion_tokens,
                 "cost_usd": resp.metrics.total_cost_usd,
+                "trace_id": resp.trace_id,
             },
             ensure_ascii=False,
         )

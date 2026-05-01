@@ -60,3 +60,4 @@ class EvaluateResponse(BaseModel):
     results: list[EvaluatePerQuestion]
     summary: EvaluateSummary
     warnings: list[str] = Field(default_factory=list)
+    trace_id: str | None = None

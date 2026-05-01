@@ -1,4 +1,7 @@
+import time
+
 from backend.ingestion.embedder import Embedder
+from backend.observability import ls_span
 from backend.schemas.query import Citation, RetrievedContext
 from backend.storage.chunk_store import ChunkStore
 from backend.vector_store.pinecone_client import PineconeIndex
@@ -21,8 +24,19 @@ class VectorRetriever:
         self._expected_dimension = expected_dimension
 
     def retrieve(self, *, question: str, top_k: int) -> list[RetrievedContext]:
-        qvec = self.embed_query(question=question)
-        matches = self._index.query(vector=qvec, top_k=top_k, namespace=self._namespace)
+        with ls_span(
+            name="embed_query",
+            run_type="embedding",
+            inputs={"question_chars": len(question or "")},
+            metadata={"expected_dimension": int(self._expected_dimension)},
+        ):
+            qvec = self.embed_query(question=question)
+        with ls_span(
+            name="vector_retrieve",
+            run_type="retriever",
+            inputs={"top_k": int(top_k), "namespace": self._namespace},
+        ):
+            matches = self._index.query(vector=qvec, top_k=top_k, namespace=self._namespace)
         out: list[RetrievedContext] = []
         for m in matches:
             md = m.metadata or {}
@@ -44,8 +58,19 @@ class VectorRetriever:
         return out
 
     def retrieve_scored(self, *, question: str, top_k: int) -> list[tuple[RetrievedContext, float]]:
-        qvec = self.embed_query(question=question)
-        matches = self._index.query(vector=qvec, top_k=top_k, namespace=self._namespace)
+        with ls_span(
+            name="embed_query",
+            run_type="embedding",
+            inputs={"question_chars": len(question or "")},
+            metadata={"expected_dimension": int(self._expected_dimension)},
+        ):
+            qvec = self.embed_query(question=question)
+        with ls_span(
+            name="vector_retrieve",
+            run_type="retriever",
+            inputs={"top_k": int(top_k), "namespace": self._namespace},
+        ):
+            matches = self._index.query(vector=qvec, top_k=top_k, namespace=self._namespace)
         out: list[tuple[RetrievedContext, float]] = []
         for m in matches:
             md = m.metadata or {}
@@ -70,7 +95,18 @@ class VectorRetriever:
         return out
 
     def embed_query(self, *, question: str) -> list[float]:
+        start = time.perf_counter()
         qvec = self._embedder.embed_texts([question])[0]
+        try:
+            elapsed = int((time.perf_counter() - start) * 1000)
+        except Exception:
+            elapsed = 0
+        try:
+            from backend.observability import ls_update_current
+
+            ls_update_current(metadata={"embedding_latency_ms": elapsed})
+        except Exception:
+            pass
         if len(qvec) != self._expected_dimension:
             raise RuntimeError(
                 f"Embedding dimension mismatch: got {len(qvec)} but expected {self._expected_dimension}. "

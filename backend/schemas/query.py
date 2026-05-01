@@ -25,7 +25,24 @@ class UsageMetrics(BaseModel):
     total_cost_usd: float | None = None
 
 
+class GraphEdge(BaseModel):
+    source_paper_id: str
+    rel_type: str
+    target_type: str
+    target_id_or_name: str
+    chunk_index: int | None = None
+    evidence: str | None = None
+    confidence: float | None = None
+
+
+class GraphDebug(BaseModel):
+    seed_paper_ids: list[str] = Field(default_factory=list)
+    related_paper_ids: list[str] = Field(default_factory=list)
+    edges: list[GraphEdge] = Field(default_factory=list)
+
+
 class QueryResponse(BaseModel):
     answer: str
     contexts: list[RetrievedContext]
     metrics: UsageMetrics
+    graph: GraphDebug | None = None

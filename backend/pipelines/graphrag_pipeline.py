@@ -2,7 +2,7 @@ import time
 from dataclasses import dataclass
 
 from backend.graph_store.neo4j_client import Neo4jClient
-from backend.schemas.query import Citation, QueryResponse, RetrievedContext, UsageMetrics
+from backend.schemas.query import Citation, GraphDebug, GraphEdge, QueryResponse, RetrievedContext, UsageMetrics
 from backend.storage.chunk_store import ChunkStore
 from backend.vector_store.pinecone_client import PineconeIndex
 from backend.vector_store.retriever import VectorRetriever
@@ -80,8 +80,27 @@ class GraphRAGPipeline:
 
         merged_contexts = self._dedupe_contexts(seed_contexts + graph_contexts + extra_contexts)
 
+        graph_debug = GraphDebug(
+            seed_paper_ids=seed_papers,
+            related_paper_ids=related_papers,
+            edges=[
+                GraphEdge(
+                    source_paper_id=e.source_paper_id,
+                    rel_type=e.rel_type,
+                    target_type=e.target_type,
+                    target_id_or_name=e.target_id_or_name,
+                    chunk_index=e.chunk_index,
+                    evidence=e.evidence,
+                    confidence=e.confidence,
+                )
+                for e in edges
+            ],
+        )
+
         if not merged_contexts:
-            return self._rag.run_with_contexts(question=question, contexts=[], start=start)
+            resp = self._rag.run_with_contexts(question=question, contexts=[], start=start)
+            resp.graph = graph_debug
+            return resp
 
         system, user = self._build_graphrag_prompt(question=question, contexts=merged_contexts, edges=edges)
         answer, usage = self._rag.synthesize_with_prompt(system=system, user=user)
@@ -93,7 +112,7 @@ class GraphRAGPipeline:
             total_tokens=usage.get("total_tokens"),
             total_cost_usd=usage.get("total_cost_usd"),
         )
-        return QueryResponse(answer=answer, contexts=merged_contexts, metrics=metrics)
+        return QueryResponse(answer=answer, contexts=merged_contexts, metrics=metrics, graph=graph_debug)
 
     def _fetch_graph_edges(self, *, seed_papers: list[str], limit: int) -> list[GraphEdgeEvidence]:
         if not seed_papers:

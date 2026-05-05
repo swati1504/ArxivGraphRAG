@@ -19,9 +19,10 @@ The project should be built in phases so that every phase produces a usable arti
 | --- | --- | --- |
 | Phase 1 | Standard RAG: ingestion + `/query/rag` | Done |
 | Phase 2 | GraphRAG: graph build + `/query/graphrag` | Done |
-| Phase 3 | RAGAS evaluation + A/B comparison | To do |
-| Phase 4 | Multi-agent orchestration with LangGraph | To build |
-| Phase 5 | Frontend, tracing, deployment, and portfolio packaging | Later |
+| Phase 3 | Evaluation + A/B comparison (latency/cost + judge metrics) | Done |
+| Phase 4 | Multi-agent orchestration with LangGraph | Done |
+| Phase 5 | Frontend and developer-facing visualization | Done |
+| Phase 6 | Tracing + portfolio packaging | In progress |
 
 ### Current interview narrative
 
@@ -40,6 +41,14 @@ Phase 3:
 Phase 4:
 
 > I added a LangGraph orchestration layer with specialized agents. A Query Classifier routes simple questions directly to vector retrieval, skipping Neo4j. Complex relational questions trigger planning and parallel retrieval. An Evidence Merger deduplicates sources, flags `CONTRADICTS` edges as contested claims, and passes a structured evidence packet to the Synthesizer. Every response includes an `agent_trace` with route decisions, tools used, timing, and cost.
+
+Phase 5:
+
+> I built a minimal React UI to demo and debug the system: side-by-side answers (RAG vs GraphRAG vs Agent), an agent trace timeline, a returned subgraph visualization for GraphRAG, and an evaluation dashboard to compare latency/cost and judge metrics.
+
+Phase 6:
+
+> I added LangSmith observability end-to-end with request trace IDs and per-step spans (retrieval, graph expansion, merge, synthesis, and judge scoring). That makes it easy to explain system behavior during a demo and to debug regressions.
 
 ***
 
@@ -950,6 +959,7 @@ A simple frontend helps communicate the project clearly even if the primary goal
 - `AgentTrace.tsx`: show route decisions, agent timings, and cost per step
 - `Graph.tsx`: show graph subgraph returned for GraphRAG
 - `Evaluation.tsx`: show comparison table and charts
+- show `trace_id` and link to LangSmith for each run
 
 ### Suggested visuals
 
@@ -980,7 +990,7 @@ Turn the project into a strong portfolio artifact after the core technical value
 
 ### Optional additions
 
-- LangSmith tracing
+- LangSmith tracing (implemented)
 - deployment
 - README diagrams
 - architecture screenshots
@@ -1163,12 +1173,17 @@ That is the core portfolio outcome.
 
 ## Immediate next step
 
-Since Phase 1 and Phase 2 are already implemented, the next best step is Phase 3:
+Since the core system is implemented end-to-end, the next best steps are portfolio packaging:
 
-1. finalize 15 benchmark questions across factual, entity-centric, and relational categories
-2. implement the RAGAS evaluator
-3. run `/query/rag` and `/query/graphrag` on the same benchmark
-4. record quality, latency, token usage, and estimated cost
-5. write a short A/B report explaining where GraphRAG helped, where it did not, and why
+1. capture screenshots: UI (Query/Graph/AgentTrace/Evaluation), Neo4j Browser, and LangSmith traces
+2. run evaluation with a fixed configuration and paste the summary table into the README
+3. record a short demo video following the recommended flow (UI → LangSmith trace)
+4. optionally add deployment and CI if you want “production-readiness” signals
 
-After the A/B report exists, build Phase 4 so the multi-agent router can be evaluated against both direct endpoints.
+***
+
+## What was added beyond the original plan
+
+- LangSmith tracing across RAG, GraphRAG, Agent, and evaluation judge scoring (per-step spans + metadata)
+- request `trace_id` propagation (response field + `X-Trace-Id` header) and frontend “Copy/Open LangSmith”
+- evaluation includes optional Agent comparison and judge metrics aggregation

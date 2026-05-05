@@ -275,6 +275,8 @@ The frontend includes four pages:
 ![](images/demo_eval2.jpg) 
 ![](images/demo_eval3.jpg) 
 
+![](images/neo4jdb.jpg)
+
 ## Observability
 
 This project includes request-level observability and LangSmith integration.
